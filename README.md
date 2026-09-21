@@ -8,16 +8,53 @@ AVID machine is used to.
 
 ## Install
 
-Copy `avid_mach4_post.py` into FreeCAD's post processor directory, or point
-FreeCAD at this repository:
+Copy `avid_mach4_post.py` into FreeCAD's **user macro directory**. FreeCAD's
+CAM workbench searches that directory for `*_post.py` files, so the post shows
+up in the Job's post processor dropdown as **`avid_mach4`** after a restart.
 
-* **Drop-in:** copy the file into
-  `…/FreeCAD/Mod/CAM/Path/Post/scripts/` (FreeCAD 1.0+) or
-  `…/FreeCAD/Mod/Path/Post/scripts/` (0.21 and earlier).
-* **Out of tree:** *Edit → Preferences → CAM → Job Preferences →
-  "Post Processor search paths"* and add this checkout.
+| OS | User macro directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/FreeCAD/Macro/` |
+| Linux | `~/.local/share/FreeCAD/Macro/` |
+| Windows | `%APPDATA%\FreeCAD\Macro\` (i.e. `C:\Users\<you>\AppData\Roaming\FreeCAD\Macro\`) |
 
-Then pick **`avid_mach4`** as the Job's post processor.
+**FreeCAD 1.1 and later insert a version folder** before `Macro`, named
+`v<major>-<minor>` — so on macOS the path becomes
+`~/Library/Application Support/FreeCAD/v1-1/Macro/`, on Linux
+`~/.local/share/FreeCAD/v1-1/Macro/`, and on Windows
+`%APPDATA%\FreeCAD\v1-1\Macro\`. FreeCAD 1.0 and earlier have no version
+folder.
+
+If in doubt, let FreeCAD tell you. Either read it off *Edit → Preferences →
+Python → Macro → Macro recording settings → Macro path*, or paste this into
+the FreeCAD Python console:
+
+```python
+import FreeCAD; print(FreeCAD.getUserMacroDir())
+```
+
+Then copy the file there:
+
+```bash
+# macOS (FreeCAD 1.1+ — drop the v1-1 for 1.0)
+cp avid_mach4_post.py ~/Library/Application\ Support/FreeCAD/v1-1/Macro/
+
+# Linux
+cp avid_mach4_post.py ~/.local/share/FreeCAD/v1-1/Macro/
+```
+
+Restart FreeCAD, then pick **`avid_mach4`** as the Job's post processor.
+
+### Other locations FreeCAD searches
+
+* *Edit → Preferences → CAM → Job Preferences → General → Defaults → Path* —
+  "Path to look for templates, post processors, tool tables and other external
+  files." Point it at this checkout to run the post straight from git.
+* `…/Mod/CAM/Path/Post/scripts/` inside the FreeCAD installation
+  (`…/Mod/Path/Post/scripts/` on 0.21 and earlier). This works, but it lives
+  inside the application itself, so an upgrade or reinstall wipes it — on
+  macOS it is also inside the signed `.app` bundle. Prefer the macro
+  directory.
 
 ## Usage
 
