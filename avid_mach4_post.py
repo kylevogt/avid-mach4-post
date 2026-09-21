@@ -56,6 +56,16 @@ UNITS = "G20"
 
 MM_PER_INCH = 25.4
 
+# FreeCAD's base unit system is mm/kg/s, so a velocity stored in a Path
+# command parameter is in mm/SECOND, not mm/minute.  Every feed has to be
+# multiplied by 60 on the way out or the machine crawls at 1/60 speed.
+SECONDS_PER_MINUTE = 60.0
+
+FEED_UNIT_SCALE = {
+    "mm-per-second": SECONDS_PER_MINUTE,
+    "mm-per-minute": 1.0,
+}
+
 # Order in which parameters are emitted inside a block.
 PARAMETER_ORDER = "XYZABCIJKRQPLSFHDT"
 
@@ -252,6 +262,11 @@ def _build_parser():
     parser.set_defaults(dwell_in_seconds=True)
 
     parser.add_argument(
+        "--feed-units", dest="feed_units", default="mm-per-second",
+        choices=sorted(FEED_UNIT_SCALE),
+        help="unit of the F parameter in the incoming path; FreeCAD stores "
+             "velocities in mm/second (default: mm-per-second)")
+    parser.add_argument(
         "--safe-retracts", dest="safe_retracts", default="g28",
         choices=["g28", "g30", "g53"],
         help="how to retract between operations and at program end "
@@ -306,9 +321,11 @@ class AvidPost:
         if precision is None:
             precision = 4 if inches else 3
         scale = 1.0 / MM_PER_INCH if inches else 1.0
+        feed_scale = scale * FEED_UNIT_SCALE[args.feed_units]
 
         self.xyz_format = Formatter(decimals=precision, scale=scale)
-        self.feed_format = Formatter(decimals=1 if inches else 0, scale=scale)
+        self.feed_format = Formatter(decimals=1 if inches else 0,
+                                     scale=feed_scale)
         self.abc_format = Formatter(decimals=3)
         self.rpm_format = Formatter(decimals=0, force_decimal=False)
         self.int_format = Formatter(decimals=0, force_decimal=False)
@@ -326,7 +343,8 @@ class AvidPost:
         self.b_output = OutputVariable(Formatter(decimals=3, prefix="B"))
         self.c_output = OutputVariable(Formatter(decimals=3, prefix="C"))
         self.feed_output = OutputVariable(
-            Formatter(decimals=1 if inches else 0, prefix="F", scale=scale))
+            Formatter(decimals=1 if inches else 0, prefix="F",
+                      scale=feed_scale))
         self.r_output = OutputVariable(Formatter(decimals=precision,
                                                  prefix="R", scale=scale))
         self.q_output = OutputVariable(Formatter(decimals=precision,
@@ -358,6 +376,7 @@ class AvidPost:
         self.current_work_offset = None
         self.retracted = False
         self.first_section = True
+        self.tool_changes = 0
         self.pending_tool_length_offset = False
         self.pending_coolant = None
         self.tool_numbers = []
@@ -508,7 +527,7 @@ class AvidPost:
         """Emit the retract, blank line and operation comment for an op."""
         commands = list(iter_commands(operation))
         tool_change = any(_command_name(c) in ("M6", "M06") for c in commands)
-        if tool_change or self.first_section:
+        if (tool_change or self.first_section) and not self.retracted:
             self.write_retract("Z")
         self.write_blank()
         label = getattr(operation, "Label", None) or \
@@ -525,8 +544,9 @@ class AvidPost:
         if self.current_coolant != "None" and not self.args.dust_collector:
             self.write_block("M9")
             self.current_coolant = "None"
-        if not self.first_section and self.args.optional_stop:
+        if self.tool_changes and self.args.optional_stop:
             self.write_block("M1")
+        self.tool_changes += 1
 
         tool_word = "T" + self.int_format.format(tool_number)
         if self.args.use_m6:
@@ -843,6 +863,10 @@ class AvidPost:
         return words
 
     def _update_position(self, params):
+        if "Z" in params:
+            # commanding Z means the tool is no longer parked at the
+            # retract plane
+            self.retracted = False
         for axis in ("X", "Y", "Z"):
             if axis in params and params[axis] is not None:
                 self.position[axis] = float(params[axis])
@@ -944,17 +968,37 @@ def _quantity_value(value):
         return None
 
 
+def _resolve_controller(operation):
+    """Return the ToolController behind an object in ``objectslist``.
+
+    A CAM operation carries one on ``.ToolController``; FreeCAD also hands
+    the job's ToolController objects to the post directly, and those *are*
+    the controller.
+    """
+    controller = getattr(operation, "ToolController", None)
+    if controller is not None:
+        return controller
+    if hasattr(operation, "Tool") and hasattr(operation, "ToolNumber"):
+        return operation
+    return None
+
+
 def collect_tools(operations):
     """Return the tool table used by ``operations``, in order of first use.
 
     Each entry is a dict with ``number``, ``diameter``, ``corner_radius``,
     ``name`` and ``zmin`` (the lowest Z the tool reaches, mirroring the
     ``ZMIN=`` annotation the AVID Fusion post writes).
+
+    The same tool number is often seen more than once -- from the
+    ToolController object and again from each operation that uses it -- so
+    entries are enriched as better information turns up rather than being
+    fixed by whichever object happened to come first.
     """
     tools = []
     index = {}
     for operation in operations:
-        controller = getattr(operation, "ToolController", None)
+        controller = _resolve_controller(operation)
         tool = getattr(controller, "Tool", None)
         number = getattr(controller, "ToolNumber", None)
         commands = iter_commands(operation)
@@ -968,18 +1012,20 @@ def collect_tools(operations):
         number = int(number)
         entry = index.get(number)
         if entry is None:
-            entry = {
-                "number": number,
-                "diameter": _quantity_value(getattr(tool, "Diameter", None))
-                or 0.0,
-                "corner_radius": _quantity_value(
-                    getattr(tool, "CornerRadius", None)),
-                "name": getattr(tool, "Label", None) or
-                getattr(tool, "Name", "") or "",
-                "zmin": None,
-            }
+            entry = {"number": number, "diameter": None,
+                     "corner_radius": None, "name": "", "zmin": None}
             index[number] = entry
             tools.append(entry)
+        if tool is not None:
+            if entry["diameter"] is None:
+                entry["diameter"] = _quantity_value(
+                    getattr(tool, "Diameter", None))
+            if entry["corner_radius"] is None:
+                entry["corner_radius"] = _quantity_value(
+                    getattr(tool, "CornerRadius", None)) or 0.0
+            if not entry["name"]:
+                entry["name"] = getattr(tool, "Label", None) or \
+                    getattr(tool, "Name", "") or ""
         for command in commands:
             z = _command_parameters(command).get("Z")
             if z is None:
@@ -987,6 +1033,9 @@ def collect_tools(operations):
             z = float(z)
             entry["zmin"] = z if entry["zmin"] is None else \
                 min(entry["zmin"], z)
+    for entry in tools:
+        if entry["diameter"] is None:
+            entry["diameter"] = 0.0
     return tools
 
 

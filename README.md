@@ -39,6 +39,7 @@ Common adjustments:
 | `--line-numbers` | prefix every block with an `N` word |
 | `--radius-arcs` | emit arcs as `R` instead of `I`/`J`/`K` |
 | `--no-optional-stop` | never emit `M1` before a tool change |
+| `--feed-units mm-per-minute` | only if a path's `F` is already mm/min (FreeCAD's is mm/s) |
 | `--preamble "…;…"` | extra blocks after the preamble, `;` separated |
 
 Run `python -c "import avid_mach4_post; print(avid_mach4_post.TOOLTIP_ARGS)"`
@@ -47,23 +48,27 @@ for the full list.
 ## Sample output
 
 ```gcode
-(T1  D=0.25 CR=0. - ZMIN=-0.125 - FLAT END MILL)
+(T2  D=0.25 CR=0. - ZMIN=-0.0311 - 14 FLAT)
 G90 G94 G91.1 G40 G49 G17
 G20
 G28 G91 Z0.
 G90
 
-(PROFILE OUTSIDE)
-M5
-T1 M6
-S18000 M3
-M7
+(FIXTURE)
 G54
-G0 X0. Y0.
-G43 Z0.2 H1
-G1 Z-0.125 F30.
-X4. F100.
-G2 X5. Y1. I0. J1.
+
+(TC 14 FLAT)
+M5
+T2 M6
+S12000 M3
+
+(ADAPTIVE)
+G54
+G0 G43 Z0.1969 H2
+X3. Y2.874
+Z0.1181
+G1 Z0. F80.
+G3 Y3.126 Z-0.0311 I0. J0.1248 F200.
 …
 G28 G91 Z0.
 G90

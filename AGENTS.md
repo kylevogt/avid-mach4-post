@@ -42,10 +42,39 @@ source of truth — match its output, not some other vendor's convention.
    FreeCAD calls it. A `filename` of `"-"` returns the g-code without
    writing a file; the tests rely on this.
 
+## What FreeCAD actually passes to `export`
+
+`objectslist` is not a tidy list of operations. A real job arrives as:
+
+1. the **Job** object,
+2. a **Fixture** pseudo operation whose whole path is the work offset
+   (`G54`),
+3. one **ToolController** object per tool, carrying the `M6`/`M3` blocks on
+   its own `Path` — note it *is* the controller, so it has `.Tool` and
+   `.ToolNumber` but **no `.ToolController` attribute**,
+4. then the operations that actually cut, each with `.ToolController`.
+
+Consequences that have already bitten once, all covered by
+`tests/test_freecad_job_graph.py` and the `freecad_job_graph.tap` golden:
+
+* "first section" is **not** "first tool change" — the Fixture pseudo op
+  gets there first, so count tool changes for the `M1` optional stop.
+* The tool table has to be enriched across objects: the ToolController knows
+  the tool, the operations know the Z depths, and neither alone is enough.
+* Several sections can open before anything moves, so the start-up retract
+  must be suppressed when the tool is already parked (`self.retracted`,
+  cleared whenever Z is commanded, mirroring the Fusion post).
+
 ## Conventions that matter to the output
 
-* **FreeCAD internal units are millimetres and mm/min.** All conversion
-  happens in the `Formatter` `scale` factor. Never convert twice.
+* **FreeCAD internal units are mm/kg/s.** Lengths in a `Path.Command`
+  parameter are millimetres, but **velocities are mm/SECOND, not mm/min** —
+  FreeCAD's base time unit is the second, which is why every post FreeCAD
+  ships wraps `F` in `Units.Quantity(value, FreeCAD.Units.Velocity)` before
+  converting. Getting this wrong emits a program that runs at 1/60 speed.
+  The conversion lives in `FEED_UNIT_SCALE` and the `Formatter` `scale`
+  factor; never convert twice. Tests state feeds through the `mmpm()` /
+  `ipm()` helpers in `tests/conftest.py` so the intent stays readable.
 * **Fusion style numbers**: trailing zeros trimmed, decimal point always
   present — `X0.`, `Z-1.25`, `F60.`. That is `Formatter(force_decimal=True,
   trim=True)`. Integers (`S`, `T`, `H`, `N`) use `force_decimal=False`.
@@ -78,6 +107,11 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
   make a red test go green without understanding the diff.
 * When you add or change post behaviour, add a test that asserts on the
   emitted *block*, not on internal state.
+* **Unit tests cannot catch a wrong assumption about FreeCAD.** The feed
+  unit bug passed 127 green tests because the tests encoded the same wrong
+  assumption as the code. Anything that depends on what FreeCAD puts in the
+  command stream needs checking against a real export, not just a fixture
+  you wrote yourself.
 
 ## Working on the post
 
