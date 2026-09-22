@@ -20,7 +20,7 @@ up in the Job's post processor dropdown as **`avid_mach4`** after a restart.
 | Windows | `%APPDATA%\FreeCAD\Macro\` (i.e. `C:\Users\<you>\AppData\Roaming\FreeCAD\Macro\`) |
 
 **FreeCAD 1.1 and later insert a version folder** before `Macro`, named
-`v<major>-<minor>` — so on macOS the path becomes
+`v<major>-<minor>` (confirmed on 26.3, where it is `v26-3`) — so on macOS the path becomes
 `~/Library/Application Support/FreeCAD/v1-1/Macro/`, on Linux
 `~/.local/share/FreeCAD/v1-1/Macro/`, and on Windows
 `%APPDATA%\FreeCAD\v1-1\Macro\`. FreeCAD 1.0 and earlier have no version

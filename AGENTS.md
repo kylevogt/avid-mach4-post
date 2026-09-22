@@ -66,6 +66,21 @@ authority; as of 1.0 a job arrives as:
    `.Tool` and `.ToolNumber` but **no `.ToolController` attribute**,
 3. then the operations that actually cut, each with `.ToolController`.
 
+Verified against a real export from FreeCAD **26.3.0** with
+`tools/avid_probe_post.py` (`objectslist` was exactly
+`['Fixture', 'TC__1_4__Flat', 'Adaptive']`). Two things that report settled
+and that are easy to get wrong:
+
+* **The objects are `Postable` wrappers, not document objects.** They proxy
+  attribute access to the underlying object, which is why duck typing keeps
+  working — but they do not all carry the attributes a document object
+  would. The Fixture wrapper has no `TypeId`, no `Placement` and no
+  `Active`; the ToolController wrapper reports `ToolController = None` and
+  carries `.Tool`/`.ToolNumber` itself. Never `isinstance` check, and never
+  assume an attribute exists.
+* **`ClearanceHeight` / `SafeHeight` are on the operation** (5.0 mm and
+  3.0 mm in that export) if a future change ever needs them.
+
 **The Job object is not in the list.** `_buildPostList` never appends it,
 so `_find_job()` returns `None` on a real export and the job-label and
 machine comments never appear — which is why a real export starts straight
@@ -156,13 +171,21 @@ Consequences that have already bitten once, all covered by
 
 ## Conventions that matter to the output
 
+* **Rapids carry `F` and it is zero.** A ToolController whose `HorizRapid`
+  and `VertRapid` are unset reports `0.00 in/min`, and FreeCAD puts `F:0.0`
+  into the `G0` commands themselves — 3 of the 16 rapids in the verified
+  export. `write_linear` drops `F` on `G0` (`if code != 0`); if that guard
+  ever goes, the program emits `F0.` and the machine faults or crawls.
 * **FreeCAD internal units are mm/kg/s.** Lengths in a `Path.Command`
   parameter are millimetres, but **velocities are mm/SECOND, not mm/min** —
   FreeCAD's base time unit is the second, which is why every post FreeCAD
   ships wraps `F` in `Units.Quantity(value, FreeCAD.Units.Velocity)` before
   converting. Getting this wrong emits a program that runs at 1/60 speed.
   The conversion lives in `FEED_UNIT_SCALE` and the `Formatter` `scale`
-  factor; never convert twice. Tests state feeds through the `mmpm()` /
+  factor; never convert twice. **Confirmed against a real export**: a
+  ToolController set to `220.00 in/min` reports `Quantity Value=93.1333`
+  with `Unit: mm/s`, and the `G3` commands carry `F=93.133333`; 93.1333 x
+  60 / 25.4 = 220.00. Tests state feeds through the `mmpm()` /
   `ipm()` helpers in `tests/conftest.py` so the intent stays readable.
 * **Number style**: trailing zeros trimmed, decimal point always
   present — `X0.`, `Z-1.25`, `F60.`. That is `Formatter(force_decimal=True,
