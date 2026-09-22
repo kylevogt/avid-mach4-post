@@ -107,13 +107,54 @@ class TestArcs:
         ])
         assert "G3 X1. Y1. I0. J1. F40." in out
 
-    def test_helical_arc_keeps_k(self, run_post):
+    def test_helical_arc_climbs_through_z_not_k(self, run_post):
+        # Mach4 halts on "K word given for arc in XY plane"; FreeCAD puts
+        # K=0 on every G17 arc, and a real job stopped dead on its first
+        # corner because of it
         out = run_body(run_post, [
             cmd("G0", X=0, Y=0),
             cmd("G2", X=25.4, Y=0, Z=-2.54, I=12.7, J=0, K=0, F=mmpm(1016)),
         ])
-        assert "K0." in out[-1]
-        assert "Z-0.1" in out[-1]
+        assert out[-1] == "G2 X1. Z-0.1 I0.5 J0. F40."
+
+    def test_no_k_word_on_a_flat_xy_arc(self, run_post):
+        out = run_body(run_post, [
+            cmd("G0", X=0, Y=0),
+            cmd("G2", X=25.4, Y=25.4, I=25.4, J=0, K=0, F=mmpm(1016)),
+        ])
+        assert "K" not in out[-1]
+
+    def test_a_sliver_arc_is_not_promoted_to_a_full_circle(self, run_post):
+        # a compensated corner a few microns long whose end point rounds
+        # onto its start: written as an arc, the control reads end == start
+        # as a full turn and cuts a circle of the tool's radius into the
+        # part (seen at line 1343 of a real job)
+        out = run_body(run_post, [
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", X=30.0, Y=30.0, F=mmpm(1016)),
+            cmd("G3", X=30.0005, Y=30.0002, I=-3.0, J=1.0, K=0,
+                F=mmpm(1016)),
+            cmd("G1", X=40.0, Y=40.0, F=mmpm(1016)),
+        ])
+        assert not any(b.startswith("G3") for b in out)
+        assert out[-1] == "X1.5748 Y1.5748"
+
+    def test_a_sliver_arc_still_carries_its_z(self, run_post):
+        out = run_body(run_post, [
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", X=30.0, Y=30.0, Z=0.0, F=mmpm(1016)),
+            cmd("G3", X=30.0005, Y=30.0002, Z=-2.54, I=-3.0, J=1.0, K=0,
+                F=mmpm(1016)),
+        ])
+        assert out[-1] == "Z-0.1"
+
+    def test_a_full_circle_with_rounding_noise_is_still_a_circle(
+            self, run_post):
+        out = run_body(run_post, [
+            cmd("G0", X=0, Y=0),
+            cmd("G2", X=1e-9, Y=-1e-9, I=25.4, J=0, F=mmpm(1016)),
+        ])
+        assert "G2 I1. J0. F40." in out
 
     def test_full_circle_is_defined_by_its_centre_alone(self, run_post):
         out = run_body(run_post, [

@@ -217,6 +217,19 @@ Consequences that have already bitten once, all covered by
   control's state is invalidated (tool change, retract, `G80`).
 * **Arc centres are incremental** (`G91.1` in the preamble), matching both
   FreeCAD's native output and the AVID post.
+* **No `K` word on a G17 arc.** FreeCAD puts `K=0` on every XY arc, and
+  Mach4 halts the program with "K word given for arc in XY plane" the
+  moment it reaches one -- a real job stopped dead on its first compensated
+  corner. A helix carries its climb in the `Z` word; `K` only goes out in
+  the G18/G19 planes, where it names the centre. The Fusion reference
+  (`avid_fusion_shape.tap`) has no `K` on any arc.
+* **An arc whose end point rounds onto its start is not written as an
+  arc.** Compensated corners produce slivers a few microns long; once
+  formatted to four decimals the end equals the start, and the control
+  reads that as a *full circle* of the tool's radius. `write_arc` tells a
+  real full circle (chord below `ARC_CHORD_EPS`, or a sweep past 180
+  degrees) from a sliver and writes the sliver as the linear move it rounds
+  to, which is usually nothing. `TestArcs` pins both.
 
 ## Testing
 
