@@ -10,6 +10,7 @@ from conftest import (
     FakeTool,
     FakeToolController,
     cmd,
+    mmpm,
 )
 
 from avid_mach4_post import AvidPost, process_arguments
@@ -21,12 +22,12 @@ def simple_op(label="Op", tool=1):
         cmd("M3", S=12000),
         cmd("G0", X=0, Y=0),
         cmd("G0", Z=5.08),
-        cmd("G1", Z=-1.0, F=500),
+        cmd("G1", Z=-1.0, F=mmpm(500)),
     ], FakeToolController(tool))
 
 
 class TestPreamble:
-    def test_preamble_matches_the_avid_post(self, run_post):
+    def test_preamble_is_the_expected_safe_state(self, run_post):
         lines = run_post(simple_op())
         assert "G90 G94 G91.1 G40 G49 G17" in lines
         assert "G20" in lines
@@ -48,8 +49,16 @@ class TestPreamble:
 
 
 class TestHeader:
-    def test_header_is_written_by_default(self, run_post):
+    def test_no_generated_by_header_by_default(self, run_post):
+        # an AVID/Fusion program opens with the program name and the tool
+        # table, and carries no timestamp
         lines = run_post([FakeJob(), simple_op()], "")
+        assert "(EXPORTED BY FREECAD)" not in lines
+        assert not any(line.startswith("(OUTPUT TIME") for line in lines)
+        assert lines[0] == "(JOB)"
+
+    def test_header_can_be_asked_for(self, run_post):
+        lines = run_post([FakeJob(), simple_op()], "--header")
         assert "(EXPORTED BY FREECAD)" in lines
         assert any(line.startswith("(OUTPUT TIME") for line in lines)
 
@@ -74,7 +83,7 @@ class TestHeader:
         op = FakeOperation("Contour", [
             cmd("M6", T=3),
             cmd("G0", Z=5.08),
-            cmd("G1", Z=-6.35, F=500),
+            cmd("G1", Z=-6.35, F=mmpm(500)),
         ], FakeToolController(3, FakeTool("Flat End Mill", 6.35, 0.0)))
         lines = run_post([FakeJob(), op], "--no-header")
         tool_line = [line for line in lines if line.startswith("(T3")][0]
@@ -97,6 +106,10 @@ class TestFooter:
     def test_program_ends_with_m30(self, run_post):
         assert run_post(simple_op())[-1] == "M30"
 
+    def test_footer_is_just_m30_without_retracts(self, run_post):
+        lines = run_post(simple_op(), "--safe-retracts none")
+        assert lines[-2:] == ["", "M30"]
+
     def test_footer_retracts_z_then_xy(self, run_post):
         lines = run_post(simple_op())
         end = lines.index("M30")
@@ -105,7 +118,7 @@ class TestFooter:
 
 
 class TestSafeRetracts:
-    def test_g28_is_the_default(self, run_post):
+    def test_g28_is_the_default_and_restores_absolute(self, run_post):
         lines = run_post(simple_op())
         assert "G28 G91 Z0." in lines
         assert lines[lines.index("G28 G91 Z0.") + 1] == "G90"
@@ -115,17 +128,28 @@ class TestSafeRetracts:
         assert "G30 G91 Z0." in lines
         assert "G28 G91 Z0." not in lines
 
-    def test_g53_skips_the_z_retract_and_homes_xy_in_machine_coords(
-            self, run_post):
+    def test_g53_retracts_in_machine_coordinates(self, run_post):
         lines = run_post(simple_op(), "--no-header --safe-retracts g53")
         assert not any(line.startswith("G28") for line in lines)
+        assert "G53 G0 Z0." in lines
         assert "G53 G0 X0. Y0." in lines
+
+    def test_g53_lifts_z_before_it_traverses_to_machine_home(self,
+                                                             run_post):
+        # the footer used to send the tool to machine home in XY at
+        # whatever depth the last operation stopped at
+        lines = run_post(simple_op(), "--no-header --safe-retracts g53")
+        cut = max(i for i, ln in enumerate(lines) if ln.startswith("G1 Z-"))
+        assert lines.index("G53 G0 Z0.", cut) < \
+            lines.index("G53 G0 X0. Y0.")
 
     def test_g53_honours_configured_home(self, run_post):
         lines = run_post(
             simple_op(),
-            "--no-header --safe-retracts g53 --home-x 25.4 --home-y 50.8")
+            "--no-header --safe-retracts g53 --home-x 25.4 --home-y 50.8"
+            " --home-z -25.4")
         assert "G53 G0 X1. Y2." in lines
+        assert "G53 G0 Z-1." in lines
 
     def test_retracting_xy_and_z_together_in_g53_mode_is_rejected(self):
         post = AvidPost(process_arguments("--safe-retracts g53"))
@@ -166,7 +190,76 @@ class TestWordSeparator:
 
 class TestBuildDeterminism:
     def test_timestamp_can_be_injected(self):
-        post = AvidPost(process_arguments(""))
+        post = AvidPost(process_arguments("--header"))
         gcode = post.build([FakeJob(), simple_op()],
                            now=datetime.datetime(2024, 1, 2, 3, 4, 5))
         assert "(OUTPUT TIME 2024-01-02 030405)" in gcode
+
+
+class TestNoSafeRetracts:
+    """``--safe-retracts none`` reproduces the AVID Fusion post with its
+    ``useG28`` property off: no retract block anywhere, and each operation's
+    own clearance-height move is what lifts the tool."""
+
+    def two_ops(self):
+        def op(label, tool):
+            return FakeOperation(label, [
+                cmd("M6", T=tool), cmd("M3", S=20000),
+                cmd("G0", Z=15.24),
+                cmd("G0", X=78.58, Y=78.31),
+                cmd("G1", Z=5.08, F=mmpm(2540)),
+                cmd("G0", Z=15.24),
+            ], FakeToolController(tool, FakeTool(f"T{tool}")))
+        return [op("Rough", 1), op("Finish", 2)]
+
+    def test_no_retract_block_is_emitted(self, run_post):
+        lines = run_post(self.two_ops(),
+                         "--no-header --no-write-tools --safe-retracts none")
+        assert not any(line.startswith(("G28", "G30", "G53"))
+                       for line in lines)
+
+    def test_the_program_still_ends_with_m30(self, run_post):
+        lines = run_post(self.two_ops(),
+                         "--no-header --no-write-tools --safe-retracts none")
+        assert lines[-1] == "M30"
+        assert lines[-2] == ""
+
+    def test_xy_still_leads_the_descent_at_a_section_head(self, run_post):
+        # nothing ever sets self.retracted in this mode, so the reorder has
+        # to work off the section boundary instead
+        lines = run_post(self.two_ops(),
+                         "--no-header --no-write-tools --safe-retracts none")
+        tail = lines[lines.index("(FINISH)"):]
+        assert tail[6:8] == ["G0 X3.0937 Y3.0831", "G43 Z0.6 H2"]
+
+    def test_a_lift_out_of_the_cut_is_never_held_back(self, run_post):
+        # the previous operation ended down in the work: its clearance move
+        # has to happen before anything traverses
+        first = FakeOperation("A", [
+            cmd("M6", T=1), cmd("M3", S=12000),
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", Z=-12.7, F=mmpm(500)),
+        ], FakeToolController(1))
+        second = FakeOperation("B", [
+            cmd("G0", Z=15.24),
+            cmd("G0", X=76.2, Y=76.2),
+            cmd("G1", Z=-12.7, F=mmpm(500)),
+        ], FakeToolController(1))
+        lines = run_post([first, second],
+                         "--no-header --no-write-tools --safe-retracts none")
+        tail = lines[lines.index("(B)"):]
+        assert tail[1:3] == ["G0 Z0.6", "X3. Y3."]
+
+    def test_a_mid_section_tool_change_lifts_first(self, run_post):
+        operation = FakeOperation("Custom", [
+            cmd("M6", T=1), cmd("M3", S=12000),
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", Z=-76.2, F=mmpm(500)),
+            cmd("M6", T=2), cmd("M3", S=12000),
+            cmd("G0", Z=127.0),
+            cmd("G0", X=101.6, Y=101.6),
+        ], FakeToolController(1))
+        lines = run_post(operation,
+                         "--no-header --no-write-tools --safe-retracts none")
+        tail = lines[lines.index("T2 M6"):]
+        assert tail[3:5] == ["G0 G43 Z5. H2", "X4. Y4."]

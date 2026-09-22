@@ -10,10 +10,13 @@ def motion_op(commands, label="Op"):
 
 
 def body(lines):
-    """Return just the operation body, without header/preamble/footer."""
+    """Return just the operation body, without header/preamble/footer.
+
+    The footer starts at the blank line after the section, whose length
+    depends on --safe-retracts, so it is found rather than counted.
+    """
     start = lines.index("(OP)")
-    end = len(lines) - 6
-    return lines[start + 1:end]
+    return lines[start + 1:lines.index("", start)]
 
 
 def run_body(run_post, commands, argstring="--no-header --no-write-tools"):
@@ -212,8 +215,11 @@ class TestPassthrough:
 
     def test_duplicate_state_codes_are_collapsed(self, run_post):
         lines = run_post(motion_op([cmd("G90"), cmd("G21"), cmd("G90")]),
-                         "--no-header --no-write-tools --metric")
-        assert lines.count("G90") == 3  # preamble + two retract restores
+                         "--no-write-tools --metric")
+        # the stream's own G90s change nothing and its unit word is dropped
+        # outright; the three G90 lines all come from retracts restoring
+        # absolute mode after their G91 block
+        assert lines.count("G90") == 3
         assert lines.count("G21") == 1
 
 

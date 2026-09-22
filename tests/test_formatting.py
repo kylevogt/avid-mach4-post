@@ -1,7 +1,8 @@
 """Number, word and comment formatting.
 
-The AVID post inherits Fusion's ``createFormat``/``createVariable``
-behaviour; these tests pin the parts that are visible in the g-code.
+These tests pin the parts of the formatting that are visible in the g-code:
+trimmed trailing zeros, a decimal point that is always present, modal
+suppression of unchanged words, and what survives inside a comment.
 """
 
 import pytest
@@ -94,8 +95,17 @@ class TestComments:
         assert format_comment("Face the stock") == "(FACE THE STOCK)"
 
     def test_unsupported_characters_are_dropped(self):
-        # Mach4 chokes on nested parens, colons and slashes
-        assert format_comment("Pocket (2): 1/2\" tool") == "(POCKET 2 12 TOOL)"
+        # Mach4 chokes on nested parens and colons
+        assert format_comment("Pocket (2): 1/2 tool") == "(POCKET 2 1-2 TOOL)"
+
+    def test_fractions_keep_their_slash_as_a_dash(self):
+        # dropping the "/" turned "1/4 Flat" into "14 FLAT", which reads as
+        # a 14 mm cutter
+        assert format_comment("1/4 Flat") == "(1-4 FLAT)"
+
+    def test_inch_and_diameter_marks_are_transliterated(self):
+        assert format_comment('1/2" Downcut') == "(1-2IN DOWNCUT)"
+        assert format_comment("\u00d86 Ball") == "(D6 BALL)"
 
     def test_permitted_punctuation_survives(self):
         assert format_comment("D=0.25, CR=0.0_A-B") == "(D=0.25, CR=0.0_A-B)"

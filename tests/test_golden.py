@@ -94,6 +94,48 @@ def freecad_job_graph():
             FakeToolControllerOp(2, tool, "TC: 1/4 Flat"), adaptive]
 
 
+IN = 25.4
+
+
+def avid_fusion_shape():
+    """The FreeCAD equivalent of a real AVID/Fusion 360 export.
+
+    Pinned against ``2D Adaptive1`` from a program posted by AVID's own
+    Fusion post. Posted with ``--safe-retracts none`` and nothing else --
+    the retract is the one deliberate divergence in the defaults, so this
+    is the file that says whether everything *else* still matches Fusion:
+    the same preamble, the same header (program name, machine if the job
+    names one, tools -- no timestamp), ``G0 X.. Y..`` before
+    ``G43 Z.. H1``, and a bare ``M30`` at the end.
+
+    The job deliberately carries no machine information, which is the
+    common FreeCAD case and what the reference file shows.
+    """
+    def i(value):
+        return value * IN
+
+    tool = FakeTool("Flat End Mill", i(0.25), 0.0)
+    adaptive = FakeOperation("2D Adaptive1", [
+        cmd("G0", Z=i(0.6)),
+        cmd("G0", X=i(3.0938), Y=i(3.0829)),
+        cmd("G1", Z=i(0.2), F=mmpm(100 * IN)),
+        cmd("G1", Z=i(0.1)),
+        cmd("G3", X=i(2.9101), Y=i(3.0871), Z=i(0.0636),
+            I=i(-0.0938), J=i(-0.0829), F=mmpm(30 * IN)),
+        cmd("G3", X=i(2.92), Y=i(2.9046), Z=i(0.0273),
+            I=i(0.0894), J=i(-0.0867)),
+        cmd("G3", X=i(2.8804), I=i(-0.1188), J=0.0),
+        cmd("G3", X=i(3.1181), I=i(0.1188), J=0.0),
+        cmd("G1", X=i(3.1182), Y=i(3.0088), F=mmpm(100 * IN)),
+        cmd("G1", X=i(3.1244), Y=i(3.0444)),
+        cmd("G0", Z=i(0.6)),
+    ], FakeToolController(1, tool), coolant="None")
+    return [FakeJob("FusionExample", FakeMachine("", "", "")),
+            FakeFixtureOp("G54"),
+            FakeToolControllerOp(1, tool, "TC: Flat End Mill", speed=20000),
+            adaptive]
+
+
 def generate(argstring):
     post = AvidPost(process_arguments(argstring))
     return post.build(sample_job(), now=TIMESTAMP)
@@ -102,10 +144,17 @@ def generate(argstring):
 @pytest.mark.parametrize("name,argstring", [
     ("imperial.tap", ""),
     ("metric.tap", "--metric"),
+    ("header.tap", "--header"),
     ("line_numbers.tap", "--line-numbers --safe-retracts g53"),
 ])
 def test_matches_reference_program(name, argstring):
     _assert_matches(generate(argstring), name)
+
+
+def test_matches_reference_avid_fusion_shape():
+    post = AvidPost(process_arguments("--safe-retracts none"))
+    _assert_matches(post.build(avid_fusion_shape(), now=TIMESTAMP),
+                    "avid_fusion_shape.tap")
 
 
 def test_matches_reference_freecad_job_graph():

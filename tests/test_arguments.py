@@ -4,10 +4,15 @@ from avid_mach4_post import process_arguments
 
 
 class TestDefaults:
-    def test_defaults_match_the_avid_fusion_post(self):
+    def test_defaults_match_a_real_avid_fusion_program(self):
+        # pinned against an AVID/Fusion export: G20, no generated-by
+        # header, M6 tool changes with an optional stop, I/J arcs.  The one
+        # deliberate divergence is the retract: a tool change happens with
+        # the spindle parked at the top of Z.
         args = process_arguments("")
         assert args.inches is True
         assert args.comments is True
+        assert args.header is False
         assert args.write_machine is True
         assert args.write_tools is True
         assert args.use_m6 is True

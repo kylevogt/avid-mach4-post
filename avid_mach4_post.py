@@ -1,23 +1,33 @@
 """AVID CNC / Mach4 post processor for the FreeCAD CAM workbench.
 
-This post reproduces the behaviour of the ``Avid CNC`` post processor that
-AVID CNC ships for Autodesk Fusion 360 (``avid cnc.cps``), so that g-code
-produced by FreeCAD runs on an AVID CNC machine driven by Mach4 without any
-hand editing.
-
-Behaviour that is deliberately copied from the Fusion post:
+The g-code an AVID CNC machine running Mach4 is used to seeing has a
+particular shape, and this post emits programs in that shape so FreeCAD
+output runs without hand editing.  The conventions it targets:
 
 * ``(COMMENTS LIKE THIS)`` -- upper cased and filtered down to the character
   set Mach4 accepts inside a comment.
-* Fusion style number formatting: trailing zeros trimmed, but a decimal point
-  is always emitted (``X0.``, ``Z-1.25``, ``F60.``).
+* Numbers with trailing zeros trimmed but the decimal point always present
+  (``X0.``, ``Z-1.25``, ``F60.``).
 * Preamble ``G90 G94 G91.1 G40 G49 G17`` followed by ``G20``/``G21``.
 * Tool changes emitted as ``M5`` / coolant off / ``M1`` / ``T<n> M6`` /
-  ``S<rpm> M3`` / work offset / ``G0 G43 Z<z> H<n>``.
-* Safe retracts through ``G28 G91 Z0.`` + ``G90`` (or ``G30``, or ``G53``).
+  ``S<rpm> M3`` / work offset, then ``G0 X<x> Y<y>`` and ``G43 Z<z> H<n>``
+  -- XY positioned before the tool comes down.
+* ``G28 G91 Z0.`` + ``G90`` before every tool change and at program end, so
+  the spindle is parked at the top of Z when a tool is swapped by hand
+  (also ``G30``, ``G53``, or ``none`` -- the AVID Fusion post's own
+  behaviour with ``useG28`` off).
 * Arcs in incremental ``I``/``J``/``K`` form, optionally as ``R``.
 * Optional dust collector support (``M7`` in the header, ``M9`` in the footer).
 * Program end with ``M30``.
+
+Every default is chosen so that a FreeCAD job posts the same way the same
+job would out of Fusion, with one deliberate exception: retracts.
+``tests/fixtures/avid_fusion_shape.tap`` is pinned to a real AVID/Fusion
+export and reproduced with ``--safe-retracts none``.
+
+Only the emitted g-code is modelled on what an AVID machine expects; the
+implementation here is original, and the reference programs in
+``tests/fixtures`` are what pin the behaviour.
 
 The module has no hard dependency on FreeCAD so that it can be unit tested
 with plain CPython; the FreeCAD specific bits are imported lazily.
@@ -34,10 +44,12 @@ import shlex
 __all__ = ["export", "TOOLTIP", "TOOLTIP_ARGS", "UNITS"]
 
 TOOLTIP = """
-Post processor for AVID CNC machines running Mach4.  It mirrors the AVID
-supplied Fusion 360 post: Fusion style number formatting, G28/G30/G53 safe
-retracts, M6 tool changes with G43 tool length compensation, incremental arc
-centres and an M30 program end.
+Post processor for AVID CNC machines running Mach4.  The defaults match the
+g-code an AVID/Fusion export contains -- trimmed decimal numbers, M6 tool
+changes with G43 applied after the XY traverse, incremental arc centres and
+an M30 program end -- plus a G28 retract to the top of Z before every tool
+change.  Use --safe-retracts none for an AVID/Fusion program with no
+retracts at all.
 
 Import it with:
 
@@ -47,6 +59,20 @@ Import it with:
 
 # Mach4 only accepts this subset inside a comment; anything else is dropped.
 PERMITTED_COMMENT_CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,=_-"
+
+# Characters Mach4 rejects that change the meaning of a tool name when they
+# are simply dropped -- "1/4 Flat" would otherwise read as "14 FLAT", i.e. a
+# 14 mm cutter.  Anything not listed here is still dropped.
+COMMENT_SUBSTITUTIONS = {
+    "/": "-",
+    "\\": "-",
+    "\u00b0": "DEG",
+    "\u00d8": "D",
+    '"': "IN",
+    "#": "NO",
+    "%": "PCT",
+    "&": "AND",
+}
 
 #: Default file extension used by the AVID/Mach4 tool chain.
 EXTENSION = ".tap"
@@ -78,26 +104,42 @@ CYCLE_CODES = {
 }
 
 # State setting codes that FreeCAD repeats between operations.  They are
-# routed through a modal group so the output stays as terse as Fusion's.
+# routed through a modal group so the output stays terse.
 MODAL_GROUPS = {
     "G17": "plane_modal", "G18": "plane_modal", "G19": "plane_modal",
-    "G20": "unit_modal", "G21": "unit_modal",
     "G90": "abs_inc_modal", "G91": "abs_inc_modal",
     "G93": "feed_mode_modal", "G94": "feed_mode_modal",
+    "G98": "retract_modal", "G99": "retract_modal",
 }
 
 WORK_OFFSET_CODES = {"G54", "G55", "G56", "G57", "G58", "G59"}
+
+# Codes that neither move the machine nor change how a coordinate is read,
+# so a Z rapid held back by write_rapid may still cross them.  G90/G91 and
+# the work offsets are deliberately absent: both change what the held back
+# Z word would mean.
+# Unit words the post refuses to pass on.  Every number it writes is
+# already scaled to the unit chosen by --inches/--metric and announced in
+# the preamble; letting a G21 through in an inch program would have Mach4
+# read "X1." as one millimetre.
+UNIT_CODES = {"G20", "G21"}
+
+STATIONARY_CODES = {
+    "G17", "G18", "G19", "G93", "G94", "G98", "G99",
+    "M3", "M03", "M4", "M04", "M5", "M05",
+    "M7", "M07", "M8", "M08", "M9", "M09",
+}
 
 
 # --------------------------------------------------------------------------
 # number / word formatting
 # --------------------------------------------------------------------------
 class Formatter:
-    """Reimplementation of Fusion's ``createFormat``.
+    """Turns a number into a g-code word.
 
     ``trim`` removes trailing zeros, ``force_decimal`` guarantees a decimal
     point is present, which together produce the ``X0.`` / ``Z-1.25`` style
-    that the AVID post emits.
+    an AVID machine expects.
     """
 
     def __init__(self, decimals=4, prefix="", scale=1.0, force_decimal=True,
@@ -138,7 +180,7 @@ class Formatter:
 
 
 class OutputVariable:
-    """Reimplementation of Fusion's ``createVariable``.
+    """A word whose value is only emitted when it changes.
 
     ``format`` returns an empty string while the value is unchanged, unless
     the variable was created with ``force`` or has been ``reset``.
@@ -185,10 +227,16 @@ class Modal(OutputVariable):
 
 
 def format_comment(text):
-    """Return ``text`` as a Mach4 safe parenthesised comment."""
-    cleaned = "".join(
-        c for c in str(text).upper() if c in PERMITTED_COMMENT_CHARS
+    """Return ``text`` as a Mach4 safe parenthesised comment.
+
+    Mach4 rejects anything outside :data:`PERMITTED_COMMENT_CHARS` inside
+    parentheses -- including nested ``()`` -- so unsupported characters are
+    either transliterated through :data:`COMMENT_SUBSTITUTIONS` or dropped.
+    """
+    expanded = "".join(
+        COMMENT_SUBSTITUTIONS.get(c, c) for c in str(text).upper()
     )
+    cleaned = "".join(c for c in expanded if c in PERMITTED_COMMENT_CHARS)
     return "(" + cleaned + ")"
 
 
@@ -207,8 +255,9 @@ def _build_parser():
 
     flag("comments", "comments", True,
          "output comments (default)", "suppress all comments")
-    flag("header", "header", True,
-         "output the generated-by header (default)", "suppress the header")
+    flag("header", "header", False,
+         "write a generated-by and timestamp header",
+         "no generated-by header, as the AVID Fusion post does (default)")
     flag("write-machine", "write_machine", True,
          "write the machine description into the header (default)",
          "do not write the machine description")
@@ -268,9 +317,14 @@ def _build_parser():
              "velocities in mm/second (default: mm-per-second)")
     parser.add_argument(
         "--safe-retracts", dest="safe_retracts", default="g28",
-        choices=["g28", "g30", "g53"],
-        help="how to retract between operations and at program end "
-             "(default: g28)")
+        choices=["g28", "g30", "g53", "none"],
+        help="how to retract between operations and at program end: g28/g30 "
+             "send the axes home incrementally, g53 moves to --home-x/y/z in "
+             "machine coordinates, none emits no retract at all and leaves "
+             "each operation's own clearance-height move to do the job -- "
+             "which is what the AVID Fusion post does with its useG28 "
+             "property off (default: g28, so that a tool change happens "
+             "with the spindle parked at the top of Z)")
     parser.add_argument("--line-number-start", dest="line_number_start",
                         type=int, default=10,
                         help="first N number (default: 10)")
@@ -282,9 +336,16 @@ def _build_parser():
                         help="decimal places for linear axes "
                              "(default: 4 for inches, 3 for millimetres)")
     parser.add_argument("--home-x", dest="home_x", type=float, default=0.0,
-                        help="X machine home used by --safe-retracts g53")
+                        help="X machine home used by --safe-retracts g53, "
+                             "in MILLIMETRES whatever the output unit")
     parser.add_argument("--home-y", dest="home_y", type=float, default=0.0,
-                        help="Y machine home used by --safe-retracts g53")
+                        help="Y machine home used by --safe-retracts g53, "
+                             "in MILLIMETRES whatever the output unit")
+    parser.add_argument("--home-z", dest="home_z", type=float, default=0.0,
+                        help="Z machine position --safe-retracts g53 "
+                             "retracts to, in MILLIMETRES whatever the "
+                             "output unit; 0 is machine zero, which on an "
+                             "AVID is the top of Z after homing")
     parser.add_argument("--preamble", dest="preamble", default="",
                         help="blocks emitted after the header, ';' separated")
     parser.add_argument("--postamble", dest="postamble", default="",
@@ -375,12 +436,29 @@ class AvidPost:
         self.current_coolant = "None"
         self.current_work_offset = None
         self.retracted = False
+        # True once X or Y has been commanded since the last retract or tool
+        # change, i.e. the tool is known to be over the work rather than
+        # wherever the previous operation happened to leave it.
+        self.xy_positioned = False
+        # Z-only rapids held back until XY has been positioned; see
+        # :meth:`write_rapid`.
+        self.pending_rapid_z = []
+        # True until the current operation has moved anything.  A tool
+        # change does not put it back: an M6 part way through an operation
+        # is not a section boundary, and the tool is wherever the cut left
+        # it.
+        self.at_section_head = True
+        # False while the tool's Z is not known in work coordinates -- at
+        # program start, and after a retract, whose height is a machine
+        # coordinate this post cannot convert.
+        self.z_known = False
         self.first_section = True
         self.tool_changes = 0
         self.pending_tool_length_offset = False
         self.pending_coolant = None
         self.tool_numbers = []
         self.section_comment = None
+        self.section_tool_number = None
 
     # -- low level output ---------------------------------------------------
     def write(self, text):
@@ -411,22 +489,43 @@ class AvidPost:
         self.write("")
 
     # -- retracts -----------------------------------------------------------
+    def write_absolute_mode(self, code):
+        """Emit ``G90``/``G91``, if the control is not in that mode already.
+
+        A real switch invalidates every cached axis word -- an absolute and
+        an incremental value are not comparable, so suppressing "the same"
+        word would drop a move -- and any Z rapid being held back, whose
+        meaning the switch would change.
+        """
+        text = self.abs_inc_modal.format(code)
+        if text:
+            self.flush_pending_rapid_z()
+            for output in self.axis_outputs.values():
+                output.reset()
+        return text
+
     def write_retract(self, *axes):
-        """Reproduce the Fusion post's ``writeRetract``.
+        """Send the named axes to a safe position.
 
         With ``g28``/``g30`` the machine is sent home in incremental mode;
-        with ``g53`` a Z only retract is skipped entirely (exactly as the
-        AVID post does) and X/Y move in machine coordinates.
+        with ``g53`` the axes move in machine coordinates, Z to
+        ``--home-z``.  Z always moves in a block of its own: sending Z and
+        XY home together would have the tool climb out of the work along a
+        diagonal.
         """
+        if self.args.safe_retracts == "none":
+            # no retract of any kind, matching the AVID Fusion post with
+            # useG28 off: the tool stays at whatever clearance height the
+            # operation itself ended on
+            return
         axes = [a.upper() for a in axes]
         use_g28 = self.args.safe_retracts in ("g28", "g30")
 
         if not use_g28 and "Z" in axes and ("X" in axes or "Y" in axes):
             raise ValueError("cannot move home in XY and Z in the same block")
-        if "Z" in axes and not use_g28:
-            return
 
-        homes = {"X": self.args.home_x, "Y": self.args.home_y, "Z": 0.0}
+        homes = {"X": self.args.home_x, "Y": self.args.home_y,
+                 "Z": self.args.home_z}
         if use_g28:
             homes = {"X": 0.0, "Y": 0.0, "Z": 0.0}
 
@@ -437,15 +536,21 @@ class AvidPost:
                 self.retracted = True
         if not words:
             return
+        # a retract ends the section: wherever XY is, it is no longer a
+        # position this program put the tool at deliberately, and Z is at a
+        # machine coordinate with no work-coordinate value
+        self.xy_positioned = False
+        if "Z" in axes:
+            self.z_known = False
 
         if use_g28:
             self.abs_inc_modal.reset()
             code = "G30" if self.args.safe_retracts == "g30" else "G28"
-            self.write_block(code, self.abs_inc_modal.format(91), *words)
-            self.write_block(self.abs_inc_modal.format(90))
+            self.write_block(code, self.write_absolute_mode(91), *words)
+            self.write_block(self.write_absolute_mode(90))
         else:
             self.motion_modal.reset()
-            self.write_block(self.abs_inc_modal.format(90), "G53",
+            self.write_block(self.write_absolute_mode(90), "G53",
                              self.motion_modal.format(0), *words)
 
         for axis in axes:
@@ -471,11 +576,16 @@ class AvidPost:
 
     def _write_machine(self, job):
         machine = getattr(job, "Machine", None) if job is not None else None
-        vendor = getattr(machine, "Vendor", None) or "Avid CNC"
+        vendor = getattr(machine, "Vendor", None) or ""
         model = getattr(machine, "Model", None) or ""
         description = getattr(machine, "Description", None) or ""
+        if not (vendor or model or description):
+            # the Fusion post writes no machine block when the job does not
+            # name one, and inventing a vendor here would be a guess
+            return
         self.write_comment("Machine")
-        self.write_comment("  vendor: " + str(vendor))
+        if vendor:
+            self.write_comment("  vendor: " + str(vendor))
         if model:
             self.write_comment("  model: " + str(model))
         if description:
@@ -507,24 +617,34 @@ class AvidPost:
         if self.args.dust_collector:
             self.write_block("M7")
         for block in _split_blocks(self.args.preamble):
-            self.write(block)
+            self.write_block(block)
 
     def write_postamble(self):
+        self.flush_pending_rapid_z()
         self.write_blank()
         if self.args.dust_collector:
             self.write_block("M9")
         elif self.current_coolant != "None":
             self.write_block("M9")
             self.current_coolant = "None"
+        # unconditionally, even if the last operation ended parked: this is
+        # the block that guarantees the tool is clear before the machine
+        # traverses to home, and it costs one redundant line to not have to
+        # trust the post's own position tracking here
         self.write_retract("Z")
         self.write_retract("X", "Y")
         for block in _split_blocks(self.args.postamble):
-            self.write(block)
+            self.write_block(block)
         self.write_block("M30")
 
     # -- sections -----------------------------------------------------------
     def begin_section(self, operation):
         """Emit the retract, blank line and operation comment for an op."""
+        self.flush_pending_rapid_z()
+        self.at_section_head = True
+        controller = _resolve_controller(operation)
+        number = getattr(controller, "ToolNumber", None)
+        self.section_tool_number = None if number is None else int(number)
         commands = list(iter_commands(operation))
         tool_change = any(_command_name(c) in ("M6", "M06") for c in commands)
         if (tool_change or self.first_section) and not self.retracted:
@@ -535,11 +655,19 @@ class AvidPost:
         self.section_comment = format_comment(label) if label else None
         if label:
             self.write_comment(label)
+        # every operation FreeCAD generates assumes it starts in absolute
+        # mode; a previous Custom op may have left the stream in G91
+        self.write_block(self.write_absolute_mode(90))
         if self.args.coolant and not self.args.dust_collector:
             self.pending_coolant = coolant_mode(operation)
         return commands
 
     def write_tool_change(self, tool_number):
+        # begin_section retracts ahead of an operation that opens with M6;
+        # an M6 that turns up part way through one has had no retract, and
+        # the tool is wherever the last cut left it
+        if not self.retracted:
+            self.write_retract("Z")
         self.write_block("M5")
         if self.current_coolant != "None" and not self.args.dust_collector:
             self.write_block("M9")
@@ -560,11 +688,13 @@ class AvidPost:
                 self.write_block("T" + self.int_format.format(nxt))
 
         self.current_tool = tool_number
-        # the AVID post forces the work offset back out after a tool change
+        # the work offset is written out again after a tool change
         self.current_work_offset = None
         if self.args.tool_length_offset:
             self.pending_tool_length_offset = True
-        # a tool change invalidates every modal value on the control
+        # a tool change invalidates every modal value on the control, and
+        # leaves the spindle wherever the change took place
+        self.xy_positioned = False
         self.motion_modal.reset()
         self.feed_output.reset()
         for output in self.axis_outputs.values():
@@ -584,8 +714,8 @@ class AvidPost:
     def write_work_offset(self, code=None, p=None):
         """Emit G54..G59 (optionally ``G59 P<n>``) when it changes.
 
-        Called with no arguments before the first motion of a section: the
-        AVID post defaults to G54 when the job never specified an offset.
+        Called with no arguments before the first motion of a section:
+        G54 is the default when the job never specified an offset.
         """
         if code is None:
             if self.current_work_offset is not None:
@@ -603,10 +733,18 @@ class AvidPost:
     def flush_coolant(self):
         if self.pending_coolant is None:
             return
-        mode = self.pending_coolant
+        mode = str(self.pending_coolant)
         self.pending_coolant = None
-        code = COOLANT_CODES.get(str(mode))
-        if code is None or mode == self.current_coolant:
+        if mode == self.current_coolant:
+            return
+        if mode == "None":
+            # the previous operation left it running; this one asked for it
+            # off, which used to be silently ignored
+            self.write_block("M9")
+            self.current_coolant = "None"
+            return
+        code = COOLANT_CODES.get(mode)
+        if code is None:
             return
         self.write_block(code)
         self.current_coolant = mode
@@ -616,6 +754,19 @@ class AvidPost:
         name = _command_name(command)
         if not name:
             return
+        if name in UNIT_CODES:
+            # the preamble already stated the unit this program is written
+            # in, and every number is scaled to it
+            return
+        if not name.startswith("(") and name not in ("G0", "G00") and \
+                name not in STATIONARY_CODES and \
+                name not in ("G90", "G91"):
+            # anything that moves the machine, or changes what a coordinate
+            # means, ends the window in which a Z rapid may be reordered.
+            # G90/G91 flush through write_absolute_mode, but only when the
+            # mode really changes -- FreeCAD's Drilling op restates G90 in
+            # the middle of its path, between the Z rapid and the traverse.
+            self.flush_pending_rapid_z()
         if name.startswith("("):
             # FreeCAD operations often repeat their own label as the first
             # comment of the path; the section header already carries it
@@ -628,8 +779,17 @@ class AvidPost:
         params = _command_parameters(command)
 
         if name in ("M6", "M06"):
-            tool = params.get("T", self.current_tool)
-            self.write_tool_change(int(tool) if tool is not None else 0)
+            tool = params.get("T")
+            if tool is None:
+                tool = self.section_tool_number
+            if tool is None:
+                tool = self.current_tool
+            if tool is None:
+                # no T anywhere: emitting "T0 M6" would order the machine to
+                # unload the spindle, so leave the tool alone
+                self.write_comment("tool change with no tool number")
+                return
+            self.write_tool_change(int(tool))
             return
         if name in ("M3", "M03", "M4", "M04"):
             speed = params.get("S")
@@ -660,9 +820,15 @@ class AvidPost:
             self.write_work_offset(name, params.get("P"))
             return
         if name in MODAL_GROUPS:
-            modal = getattr(self, MODAL_GROUPS[name])
-            self.write_block(modal.format(float(name[1:]))
-                             if self.args.modal else name)
+            # the bookkeeping runs either way: --no-modal only decides
+            # whether the word is repeated, not whether the post knows
+            # which plane or coordinate mode the control is in
+            if name in ("G90", "G91"):
+                text = self.write_absolute_mode(float(name[1:]))
+            else:
+                modal = getattr(self, MODAL_GROUPS[name])
+                text = modal.format(float(name[1:]))
+            self.write_block(name if not self.args.modal else text)
             return
         if name in MOTION_CODES:
             self.write_work_offset()
@@ -676,13 +842,18 @@ class AvidPost:
             return
         if name == "G80":
             self.cycle_modal.reset()
-            self.retract_modal.reset()
+            # G80 leaves motion group 1 empty; the next move has to name
+            # its own code or the control sees a bare axis word.  G98/G99
+            # is a different group and is not cancelled here.
+            self.motion_modal.reset()
             self.z_output.reset()
             self.r_output.reset()
             self.q_output.reset()
             self.write_block("G80")
             return
 
+        if "Z" in params:
+            self.apply_tool_length_offset()
         self.write_block(self._passthrough(name, params))
 
     def write_dwell(self, params):
@@ -698,28 +869,125 @@ class AvidPost:
         if code in (2, 3):
             self.write_arc(code, params)
             return
+        if code == 0:
+            self.write_rapid(params)
+            return
+        self.write_linear(code, params)
 
-        applies_tlo = (self.pending_tool_length_offset and code == 0 and
-                       "Z" in params)
-        if applies_tlo:
-            # the AVID post hangs G43 off the first Z rapid after a tool
-            # change: "G0 G43 Z0.2 H1"
-            self.pending_tool_length_offset = False
-            self.z_output.reset()
-            self.write_block(self.motion_modal.format(code), "G43",
-                             self.z_output.format(params["Z"]),
-                             self._h_word({}))
-            self._update_position(params)
-            self.feed_output.reset()
+    def write_rapid(self, params):
+        """Emit a rapid, keeping XY positioning ahead of any Z descent.
+
+        A retracted spindle sits at the top of Z somewhere over the table --
+        after a tool change, nowhere in particular.  FreeCAD operations open
+        with ``G0 Z<clearance>`` and only then traverse in XY, which would
+        drop the tool to within a few millimetres of the work *before*
+        crossing to the cut.  The g-code an AVID machine expects positions
+        XY first::
+
+            G0 X3. Y2.874
+            G43 Z0.1969 H2
+
+        so a Z only rapid issued while the tool is parked is held back until
+        the XY rapid that follows it has been emitted.  Nothing is
+        synthesised: the same moves come out, in the safe order.
+
+        Only a *descent* is ever held back.  A Z rapid issued while the tool
+        is still down in the work is the move that lifts it clear and has to
+        go first -- deferring that one would drag the cutter sideways
+        through the material.  Two things say the move is a descent: an
+        explicit retract has happened (``self.retracted``, the only thing
+        that can be known after a ``G28``, whose height is in machine
+        coordinates the post cannot convert), or the commanded Z is simply
+        below where the tool is now.  The second is what makes the reorder
+        work under ``--safe-retracts none``, where nothing ever retracts and
+        the tool sits at the previous operation's clearance height.
+        """
+        has_xy = "X" in params or "Y" in params
+        has_z = "Z" in params
+        parked = has_z and self._may_defer(params["Z"])
+
+        if has_z and not has_xy and parked:
+            self.pending_rapid_z.append(dict(params))
             return
 
-        motion = self.motion_modal.format(code) if self.args.modal else \
-            "G" + str(code)
+        if has_z and has_xy and parked:
+            # split so the traverse finishes before the tool comes down; a
+            # pending G43 then hangs off the Z word alone
+            self.write_linear(0, {k: v for k, v in params.items()
+                                  if k != "Z"})
+            self.flush_pending_rapid_z()
+            self.write_linear(0, {"Z": params["Z"]})
+            return
+
+        self.write_linear(0, params)
+        self.flush_pending_rapid_z()
+
+    def _may_defer(self, z):
+        """Whether a Z rapid to ``z`` may wait until XY has been positioned.
+
+        Never once the section has already positioned XY -- by then the
+        rapid is an ordinary move inside the cut.
+        """
+        if self.xy_positioned:
+            return False
+        if self.retracted:
+            # an explicit retract put the tool at the top of travel
+            return True
+        if not self.at_section_head:
+            # a tool change part way through an operation leaves the tool
+            # down in the work
+            return False
+        # no retract to lean on (--safe-retracts none, or g53 before the
+        # first one): hold the move back unless it is the lift that takes
+        # the tool out of the previous operation's cut
+        return not self._is_lift(z)
+
+    def _is_lift(self, z):
+        """True when commanding ``z`` is known to raise the tool."""
+        if not self.z_known:
+            return False
+        if self._is_incremental():
+            return float(z) > 0.0
+        return float(z) > self.position["Z"]
+
+    def flush_pending_rapid_z(self):
+        """Emit any Z rapids :meth:`write_rapid` held back, in order."""
+        if not self.pending_rapid_z:
+            return
+        pending, self.pending_rapid_z = self.pending_rapid_z, []
+        for params in pending:
+            self.write_linear(0, params)
+
+    def write_linear(self, code, params):
+        if self.pending_tool_length_offset and "Z" in params:
+            # G43 rides the first Z bearing move after a tool change, once
+            # XY has been positioned: "G0 X.. Y.." then "G43 Z0.2 H1".  It
+            # is deliberately not restricted to a rapid -- an operation
+            # whose first Z move is the plunge would otherwise cut the whole
+            # pass with the previous tool's offset still in force.
+            self.pending_tool_length_offset = False
+            self.z_output.reset()
+            other = self._coordinate_words(
+                {k: v for k, v in params.items() if k != "Z"})
+            feed = self._feed_word(params) if code != 0 else ""
+            self.write_block(self._motion_word(code), "G43", other,
+                             self.z_output.format(params["Z"]),
+                             self._h_word({}), feed)
+            self._update_position(params)
+            if code == 0:
+                self.feed_output.reset()
+            return
+
         coords = self._coordinate_words(params)
         feed = self._feed_word(params) if code != 0 else ""
         if not coords and not feed:
+            # nothing is emitted, so nothing about the control's state has
+            # changed.  Claiming motion group 1 here would let the *next*
+            # block inherit a mode the machine was never put into, and a G1
+            # with no F of its own would go out as a bare axis word while
+            # the control was still in G0 -- a rapid into the work.
             return
-        words = [self.abs_inc_modal.format(90), motion] + coords
+        words = [self._motion_word(code)] + coords
         if feed:
             words.append(feed)
         self.write_block(*words)
@@ -727,39 +995,83 @@ class AvidPost:
         if code == 0:
             self.feed_output.reset()
 
+    def apply_tool_length_offset(self):
+        """Establish a pending ``G43`` in a block of its own.
+
+        :meth:`write_linear` hangs the offset off the Z word it is already
+        writing, which is the tidier form.  Everything else that can move Z
+        -- a helical arc, a canned cycle, a probe passed straight through --
+        has to state it separately, or the move runs on the *previous*
+        tool's offset and G43 lands afterwards with a Z jump.
+        """
+        if not self.pending_tool_length_offset:
+            return
+        self.pending_tool_length_offset = False
+        self.write_block("G43", self._h_word({}))
+
+    def _motion_word(self, code):
+        """Claim motion group 1 for ``code``; a canned cycle no longer has it.
+
+        Only ever called for a block that is actually going to be written.
+        """
+        # group 1 only: G98/G99 live in group 10 and survive a G0/G1
+        self.cycle_modal.reset()
+        if not self.args.modal:
+            self.motion_modal.reset()
+        return self.motion_modal.format(code)
+
     def write_arc(self, code, params):
+        self.apply_tool_length_offset()
         start = dict(self.position)
         i = params.get("I", 0.0) or 0.0
         j = params.get("J", 0.0) or 0.0
         k = params.get("K")
-        end_x = params.get("X", start["X"])
-        end_y = params.get("Y", start["Y"])
+        if self._is_incremental():
+            # the X/Y in the block are deltas; comparing one against an
+            # absolute start turned a half circle into a full one
+            end_x = start["X"] + (params.get("X", 0.0) or 0.0)
+            end_y = start["Y"] + (params.get("Y", 0.0) or 0.0)
+        else:
+            end_x = params.get("X", start["X"])
+            end_y = params.get("Y", start["Y"])
         full_circle = (
             self.xyz_format.format(end_x) == self.xyz_format.format(start["X"])
             and self.xyz_format.format(end_y) ==
             self.xyz_format.format(start["Y"])
         )
 
-        words = [self.plane_modal.format(17) if self.args.modal else "G17"]
-        words.append(self.motion_modal.format(code) if self.args.modal
-                     else "G" + str(code))
-        if not full_circle:
-            # a full circle is defined by its centre alone, exactly as the
-            # AVID post emits it
+        words = [self._plane_word()]
+        words.append(self._motion_word(code))
+        if full_circle:
+            # a full circle needs no end point in the arc plane -- but a
+            # helix still has to carry its Z, or the turn comes out flat
+            # and every Z after it is measured from a height the machine
+            # never reached
+            words.extend(self._coordinate_words(
+                {k2: v for k2, v in params.items() if k2 not in ("X", "Y")}))
+        else:
             words.extend(self._coordinate_words(params))
 
-        if self.args.radius_arcs and not full_circle:
+        in_xy_plane = self.plane_modal.get_current() in (None, "G17")
+        if self.args.radius_arcs and not full_circle and in_xy_plane:
             radius = math.hypot(i, j)
             sweep = _arc_sweep(start["X"], start["Y"], start["X"] + i,
                                start["Y"] + j, end_x, end_y, code == 2)
             if sweep > math.pi + 1e-9:
                 radius = -radius
             words.append("R" + self.xyz_format.format(radius))
-        else:
+        elif in_xy_plane:
             words.append("I" + self.xyz_format.format(i))
             words.append("J" + self.xyz_format.format(j))
             if k is not None:
                 words.append("K" + self.xyz_format.format(k))
+        else:
+            # outside G17 the centre is described by a different pair of
+            # letters; pass through exactly what the path carries
+            for letter in ("I", "J", "K"):
+                if letter in params:
+                    words.append(
+                        letter + self.xyz_format.format(params[letter]))
 
         feed = self._feed_word(params)
         if feed:
@@ -767,31 +1079,51 @@ class AvidPost:
         self.write_block(*words)
         self._update_position(params)
 
+    def _plane_word(self):
+        """Return the arc plane word, without overriding an active plane."""
+        if self.plane_modal.get_current() is None:
+            return self.plane_modal.format(17)
+        if not self.args.modal:
+            return self.plane_modal.get_current()
+        return ""
+
     def write_cycle(self, name, params):
         """Emit a canned cycle block.
 
         The first point of a cycle carries the full definition; the ones
-        after it only carry what changed, which is how the AVID post emits
-        repeated holes.
+        after it only carry what changed, which is how repeated holes are
+        expected to read.
         """
-        retract_word = self.retract_modal.format(98) if self.args.modal \
-            else "G98"
+        # nothing in a cycle carries a plain Z move for G43 to ride, so the
+        # offset has to be established before the first hole
+        self.apply_tool_length_offset()
+        # a canned cycle takes over motion group 1 from G0/G1/G2/G3
+        self.motion_modal.reset()
+        if self.retract_modal.get_current() is None:
+            retract_word = self.retract_modal.format(98)
+        elif self.args.modal:
+            retract_word = ""
+        else:
+            retract_word = self.retract_modal.get_current()
         cycle_word = self.cycle_modal.format(float(name[1:])) \
             if self.args.modal else name
         first_point = bool(cycle_word) or not self.args.modal
 
+        # under G91 every hole is a delta from the last one, so two holes
+        # that share a word are two holes, not one
+        restate = first_point or self._is_incremental()
         words = [retract_word, cycle_word]
         for axis in ("X", "Y", "Z"):
             if axis not in params:
                 continue
             value = params[axis]
-            if first_point:
+            if restate:
                 self.axis_outputs[axis].reset()
             words.append(self.axis_outputs[axis].format(value))
         for letter, output in (("R", self.r_output), ("Q", self.q_output)):
             if letter not in params:
                 continue
-            if first_point:
+            if restate:
                 output.reset()
             words.append(output.format(params[letter]))
         if "P" in params and (first_point or params["P"]):
@@ -815,14 +1147,21 @@ class AvidPost:
         self._update_position(params)
 
     # -- helpers ------------------------------------------------------------
+    def _is_incremental(self):
+        """True while the stream has put the control into ``G91``."""
+        return self.abs_inc_modal.get_current() == "G91"
+
     def _coordinate_words(self, params):
         """Format the axis words of a block, dropping unchanged ones."""
+        incremental = self._is_incremental()
         words = []
         for axis in ("X", "Y", "Z", "A", "B", "C"):
             if axis not in params:
                 continue
             output = self.axis_outputs[axis]
-            if not self.args.modal:
+            if not self.args.modal or incremental:
+                # two identical incremental words are two separate moves,
+                # so suppressing the second one loses one of them
                 output.reset()
             words.append(output.format(params[axis]))
         return [w for w in words if w]
@@ -867,13 +1206,23 @@ class AvidPost:
             # commanding Z means the tool is no longer parked at the
             # retract plane
             self.retracted = False
+        if "X" in params or "Y" in params:
+            self.xy_positioned = True
+        self.at_section_head = False
+        incremental = self._is_incremental()
         for axis in ("X", "Y", "Z"):
             if axis in params and params[axis] is not None:
-                self.position[axis] = float(params[axis])
+                if incremental:
+                    self.position[axis] += float(params[axis])
+                else:
+                    self.position[axis] = float(params[axis])
+                if axis == "Z":
+                    self.z_known = True
 
     # -- driver -------------------------------------------------------------
     def build(self, objectslist, now=None):
-        operations = [obj for obj in objectslist if _is_path_object(obj)]
+        operations = [obj for obj in objectslist if _is_path_object(obj)
+                      and getattr(obj, "Active", True) is not False]
         job = _find_job(objectslist)
         self.tool_numbers = [t["number"] for t in collect_tools(operations)]
 
@@ -881,11 +1230,10 @@ class AvidPost:
         self.write_preamble()
 
         for operation in operations:
-            if getattr(operation, "Active", True) is False:
-                continue
             commands = self.begin_section(operation)
             for command in commands:
                 self.parse_command(command)
+            self.flush_pending_rapid_z()
             self.first_section = False
             self.feed_output.reset()
 
@@ -987,8 +1335,8 @@ def collect_tools(operations):
     """Return the tool table used by ``operations``, in order of first use.
 
     Each entry is a dict with ``number``, ``diameter``, ``corner_radius``,
-    ``name`` and ``zmin`` (the lowest Z the tool reaches, mirroring the
-    ``ZMIN=`` annotation the AVID Fusion post writes).
+    ``name`` and ``zmin`` (the lowest Z the tool reaches, which is what the
+    ``ZMIN=`` annotation in the header reports).
 
     The same tool number is often seen more than once -- from the
     ToolController object and again from each operation that uses it -- so
