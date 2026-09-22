@@ -104,7 +104,7 @@ class TestHelicalFullCircle:
             cmd("G3", X=25.4, Y=25.4, Z=-3.175, I=-5.08, J=0, K=0,
                 F=mmpm(1016)),
         ])
-        assert out[-1] == "G3 Z-0.125 I-0.2 J0. K0. F40."
+        assert out[-1] == "G3 Z-0.125 I-0.2 J0. F40."
 
     def test_a_flat_full_circle_is_still_its_centre_alone(self, run_post):
         out = run(run_post, [
