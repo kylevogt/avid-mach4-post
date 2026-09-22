@@ -54,19 +54,40 @@ which is LGPL, without relicensing.)
 
 ## What FreeCAD actually passes to `export`
 
-`objectslist` is not a tidy list of operations. A real job arrives as:
+`objectslist` is not a tidy list of operations. Read
+`Path/Post/Processor.py::_buildPostList` in the FreeCAD source for the
+authority; as of 1.0 a job arrives as:
 
-1. the **Job** object,
-2. a **Fixture** pseudo operation whose whole path is the work offset
-   (`G54`),
-3. one **ToolController** object per tool, carrying the `M6`/`M3` blocks on
-   its own `Path` — note it *is* the controller, so it has `.Tool` and
-   `.ToolNumber` but **no `.ToolController` attribute**,
-4. then the operations that actually cut, each with `.ToolController`.
+1. a **Fixture** pseudo operation (`_TempObject`, `Name == "Fixture"`)
+   whose path is the work offset — plus, for every fixture *after* the
+   first, a `G0 Z<stock ZMax + ClearanceHeightOffset>`,
+2. one **ToolController** object per tool change, carrying the `M6`/`M3`
+   blocks on its own `Path` — note it *is* the controller, so it has
+   `.Tool` and `.ToolNumber` but **no `.ToolController` attribute**,
+3. then the operations that actually cut, each with `.ToolController`.
+
+**The Job object is not in the list.** `_buildPostList` never appends it,
+so `_find_job()` returns `None` on a real export and the job-label and
+machine comments never appear — which is why a real export starts straight
+at the tool table. The code stays because a caller *may* pass a Job (and
+the tests do), but do not rely on it. Confirm anything else about the list
+with `tools/avid_probe_post.py` rather than by assuming.
+
+Ordering matters and is set by the Job's `OrderOutputBy`. Under the
+default `Fixture` ordering, `currTool` is tracked *across* fixtures, so a
+second fixture using the same tool gets **no** ToolController and therefore
+no tool change — the only thing separating the two parts is the fixture
+word. That is why a change of work offset has to invalidate every cached
+axis word (see below).
 
 Consequences that have already bitten once, all covered by
 `tests/test_freecad_job_graph.py` and the `freecad_job_graph.tap` golden:
 
+* FreeCAD's own posts read their commands through
+  `PathUtils.getPathWithPlacement(obj)`, not `obj.Path.Commands`: an
+  operation carries a `Placement`, and reading the commands raw posts it at
+  the wrong coordinates when that Placement is not the identity.
+  `iter_commands()` does the same, behind a lazy optional import.
 * "first section" is **not** "first tool change" — the Fixture pseudo op
   gets there first, so count tool changes for the `M1` optional stop.
 * The tool table has to be enriched across objects: the ToolController knows

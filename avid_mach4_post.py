@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import importlib
 import math
 import os
 import shlex
@@ -1171,7 +1172,33 @@ def _find_job(objectslist):
 
 
 def iter_commands(operation):
-    return list(operation.Path.Commands)
+    """Return an operation's commands, with its ``Placement`` applied.
+
+    Every post FreeCAD ships reads its paths through
+    ``getPathWithPlacement`` rather than ``Path.Commands``: an operation
+    carries a Placement, and reading the commands raw posts it at the
+    wrong coordinates whenever that Placement is not the identity.  The
+    import is lazy and optional so the module still loads without FreeCAD.
+    """
+    path = getattr(operation, "Path", None)
+    if path is None:
+        return []
+    if getattr(operation, "Placement", None) is not None:
+        placed = _apply_placement(operation)
+        if placed is not None:
+            path = placed
+    return list(path.Commands)
+
+
+def _apply_placement(operation):
+    """Return ``operation``'s Path with its Placement applied, or None."""
+    for module_name in ("PathScripts.PathUtils", "Path.Base.Util"):
+        try:  # pragma: no cover - requires FreeCAD
+            module = importlib.import_module(module_name)
+            return module.getPathWithPlacement(operation)
+        except Exception:
+            continue
+    return None
 
 
 def _command_name(command):
