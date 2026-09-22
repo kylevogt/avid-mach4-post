@@ -74,35 +74,22 @@ Consequences that have already bitten once, all covered by
 * Several sections can open before anything moves, so the start-up retract
   must be suppressed when the tool is already parked (`self.retracted`,
   cleared whenever Z is commanded).
-* **The XY-before-Z convention is AVID's; the reordering that achieves it is
-  ours.** A real AVID/Fusion program positions XY and only then brings Z
-  down (`tests/fixtures/avid_fusion_shape.tap`, pinned to one). But an
-  Autodesk post does not reorder anything — it is handed the section's
-  initial position as data and writes the approach itself. FreeCAD gives
-  this post a flat command stream instead, so it has to *infer* the same
-  intent and move blocks around. The convention is borrowed; the inference
-  is invented here, and it is the only place this post changes the order of
-  what FreeCAD emitted. Every bug in this area so far has come from the
-  inference, not the convention. Treat it as the highest-risk code in the
-  file and keep `TestXYBeforeZ`, `TestZLiftIsNeverDeferred` and
-  `TestNoSafeRetracts` green.
-* **Real operations open with `G0 Z<clearance>` and only then rapid in XY.**
-  Emitted verbatim after a `G28` that plunges the tool to within a few
-  millimetres of the table wherever the spindle is parked, then traverses
-  the work at that height. `write_rapid` holds a Z-only rapid back until
-  the XY rapid behind it has been written (`self.xy_positioned`,
-  `self.pending_rapid_z`); the moves are reordered, never synthesised or
-  dropped. See `TestXYBeforeZ`.
-* **The reorder never holds back a lift** (`_may_defer` / `_is_lift`). A Z
-  rapid issued while the tool is still down in the work is what takes it
-  out of the cut; deferring that one drags the cutter sideways through the
-  material. Three states, in order: `retracted` (an explicit retract
-  happened — always defer, a `G28` height is a machine coordinate the post
-  cannot compare against), `at_section_head` (a section boundary with no
-  retract, as under `--safe-retracts none` — defer unless the move is a
-  known lift), and otherwise never. Do not widen this to "a tool change is
-  pending": an `M6` part way through an operation is not a section
-  boundary. See `TestZLiftIsNeverDeferred` and `TestNoSafeRetracts`.
+* **FreeCAD's motion order is passed through untouched.** An operation goes
+  to `ClearanceHeight`, traverses in XY *there*, drops to `SafeHeight` and
+  cuts; between passes it lifts back to clearance before traversing again.
+  That is already safe — the clearance plane is the height FreeCAD
+  designates for rapid traverses, and the whole job depends on it between
+  operations — so this post does not reorder it.
+
+  An earlier version buffered the opening `G0 Z<clearance>` and emitted it
+  after the XY rapid, to reach the `G0 X.. Y..` / `G43 Z.. H1` shape an
+  AVID/Fusion program has. That was dropped deliberately. Fusion can write
+  that shape because it is handed the section's initial position and
+  composes the approach itself; this post only ever sees a flat command
+  stream, so matching the shape meant *inferring* intent and moving blocks
+  around. Every bug in that area came from the inference, not from
+  FreeCAD's ordering. **Do not reintroduce it** — the post reorders
+  nothing, and that is the property that makes it reviewable.
 * **`G43` is established before any Z move after a tool change.** It rides
   the first plain Z word in `write_linear` (rapid *or* plunge — an operation
   whose first Z move is the plunge would otherwise cut the whole pass on the
@@ -188,7 +175,9 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 * Prefer translating FreeCAD's existing command stream over synthesising
   motion. The post is a formatter plus a small state machine, not a CAM
-  kernel.
+  kernel. It emits the same moves, in the same order, as the path it was
+  given — the only blocks it adds are retracts, and the only ones it drops
+  command no movement.
 * New user-facing options go through `_build_parser()` as a paired
   `--flag` / `--no-flag` (via the local `flag()` helper) so FreeCAD's
   post-processor argument box behaves predictably.
@@ -218,7 +207,7 @@ millimetres above the work. `g30` is the same through G30; `g53` retracts
 to `--home-x`/`-y`/`-z` in machine coordinates (it used to emit nothing for
 Z, which meant the footer sent the tool to machine home in XY at whatever
 depth the last operation stopped at — do not reinstate that). Whatever the
-mode, **Z always moves in a block of its own, before any XY traverse**.
+mode, a retract moves **Z in a block of its own**, before any XY move.
 
 Do not change the `--safe-retracts` default without saying so in the PR
 description: it decides where a manual tool change happens.

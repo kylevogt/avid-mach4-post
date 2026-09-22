@@ -117,7 +117,7 @@ class TestStructure:
 
     def test_tool_length_offset_is_applied_after_the_change(self, run_post):
         lines = run_post(real_job(), "--no-header")
-        assert "G43 Z0.1969 H2" in lines
+        assert "G0 G43 Z0.1969 H2" in lines
 
     def test_only_one_tool_change_block(self, run_post):
         lines = run_post(real_job(), "--no-header")
@@ -148,92 +148,8 @@ class TestFeedUnits:
         assert "F85." in " ".join(lines)
 
 
-class TestXYBeforeZ:
-    """The tool must traverse to XY before it drops towards the work.
-
-    A real FreeCAD operation opens with ``G0 Z<clearance>`` and only then
-    rapids in XY. Emitted verbatim after a ``G28`` retract that means the
-    spindle plunges to a few millimetres above the table *wherever it
-    happens to be parked* -- over a clamp, the vice, or the previous cut --
-    and only then traverses across the work at that height.
-    """
-
-    def _body(self, lines, label="(ADAPTIVE)"):
-        """Return a section's blocks, starting at its first motion."""
-        body = lines[lines.index(label) + 1:]
-        first = next(i for i, ln in enumerate(body) if ln.startswith("G0 "))
-        return body[first:]
-
-    def test_xy_is_positioned_before_the_first_z_descent(self, run_post):
-        body = self._body(run_post(real_job(), "--no-header"))
-        first_xy = next(i for i, ln in enumerate(body) if "X3." in ln)
-        first_z = next(i for i, ln in enumerate(body) if "Z0.1969" in ln)
-        assert first_xy < first_z
-
-    def test_the_descent_carries_the_tool_length_offset(self, run_post):
-        body = self._body(run_post(real_job(), "--no-header"))
-        assert body[0] == "G0 X3. Y2.874"
-        assert body[1] == "G43 Z0.1969 H2"
-        assert body[2] == "Z0.1181"
-
-    def test_no_z_word_precedes_the_traverse(self, run_post):
-        body = self._body(run_post(real_job(), "--no-header"))
-        before = body[:next(i for i, ln in enumerate(body) if "X3." in ln)]
-        assert not any("Z" in ln for ln in before)
-
-    def test_the_held_back_rapid_is_still_emitted(self, run_post):
-        # reordered, never dropped: both clearance heights survive
-        body = self._body(run_post(real_job(), "--no-header"))
-        assert any("Z0.1969" in ln for ln in body)
-        assert any("Z0.1181" in ln for ln in body)
-
-    def test_a_mid_operation_z_rapid_is_not_reordered(self, run_post):
-        # the retract at the end of the cut has to stay where it is, or the
-        # tool would drag through the work on the way to the next position
-        job = real_job()
-        job[-1].Path.Commands.extend([
-            cmd("G0", X=100.0, Y=100.0),
-            cmd("G1", Z=-1.0, F=ipm(80)),
-        ])
-        body = self._body(run_post(job, "--no-header"))
-        retract = next(i for i, ln in enumerate(body) if ln == "G0 Z0.1969")
-        traverse = next(i for i, ln in enumerate(body) if "X3.937" in ln)
-        assert retract < traverse
-
-    def test_a_combined_rapid_keeps_its_xy(self, run_post):
-        # G43 used to be hung off the Z word of a combined X/Y/Z rapid and
-        # the X and Y words were dropped on the floor
-        job = real_job()
-        job[-1].Path.Commands[:2] = [cmd("G0", X=76.2, Y=73.0, Z=5.0)]
-        body = self._body(run_post(job, "--no-header"))
-        assert body[0] == "G0 X3. Y2.874"
-        assert body[1] == "G43 Z0.1969 H2"
-
-    def test_an_xy_first_operation_is_left_alone(self, run_post):
-        job = real_job()
-        job[-1].Path.Commands[:2] = [cmd("G0", X=76.2, Y=73.0),
-                                     cmd("G0", Z=5.0)]
-        body = self._body(run_post(job, "--no-header"))
-        assert body[0] == "G0 X3. Y2.874"
-        assert body[1] == "G43 Z0.1969 H2"
-
-    def test_ordering_holds_for_the_second_tool(self, run_post):
-        job = real_job()
-        job.append(FakeToolControllerOp(7, FakeTool("V Bit", 12.7),
-                                        "TC: V Bit"))
-        job.append(adaptive_op("Engrave", 7))
-        body = self._body(run_post(job, "--no-header"), "(ENGRAVE)")
-        assert body[0] == "G0 X3. Y2.874"
-        assert body[1] == "G43 Z0.1969 H7"
-
-
-class TestZLiftIsNeverDeferred:
-    """The reorder only applies when Z is known to be at the retract plane.
-
-    A Z rapid issued while the tool is still down in the work is the move
-    that *lifts* it clear; holding that back would drag the cutter sideways
-    through the material.
-    """
+class TestToolChangeRetracts:
+    """The spindle is parked at the top of Z before any tool is swapped."""
 
     def test_a_mid_section_tool_change_retracts_first(self, run_post):
         # begin_section only retracts ahead of an operation that *opens*
@@ -250,13 +166,12 @@ class TestZLiftIsNeverDeferred:
         lines = run_post(operation, "--no-write-tools")
         cut = lines.index("G1 G43 Z-3. H1 F20.")
         assert lines.index("G28 G91 Z0.", cut) < lines.index("T2 M6")
-        # and with Z genuinely parked the traverse leads again
         after = lines[lines.index("T2 M6"):]
-        assert after[3:5] == ["G0 X4. Y4.", "G43 Z5. H2"]
+        assert after[3:5] == ["G0 G43 Z5. H2", "X4. Y4."]
 
-    def test_g53_mode_lifts_before_it_traverses(self, run_post):
+    def test_g53_mode_retracts_before_a_tool_change(self, run_post):
         # --safe-retracts g53 used to emit no Z retract at all, so the tool
-        # stayed at cutting depth through the tool change and the traverse
+        # stayed at cutting depth through the tool change
         def op(label, tool):
             return FakeOperation(label, [
                 cmd("M6", T=tool), cmd("M3", S=12000),
@@ -269,93 +184,16 @@ class TestZLiftIsNeverDeferred:
                          "--no-header --no-write-tools --safe-retracts g53")
         cut = lines.index("G1 Z-1. F20.")
         assert lines.index("G53 G0 Z0.", cut) < lines.index("T2 M6")
-        # and with Z genuinely parked the traverse may lead again
         after = lines[lines.index("T2 M6"):]
-        assert after[3:5] == ["G0 X4. Y4.", "G43 Z5. H2"]
-
-
-class TestNothingIsLost:
-    def test_every_commanded_z_height_reaches_the_program(self, run_post):
-        job = real_job()
-        lines = run_post(job, "--no-header --no-write-tools")
-        wanted = ["Z0.1969", "Z0.1181", "Z0.", "Z-0.0311"]
-        for word in wanted:
-            assert any(word in line.split(" ")[-1] or
-                       (" " + word + " ") in " " + line + " "
-                       for line in lines), word
-
-    def test_a_section_whose_last_move_is_a_held_back_z(self, run_post):
-        # nothing follows the deferred rapid, so the flush at the end of the
-        # section has to emit it
-        job = real_job()
-        job[-1].Path.Commands = [cmd("G0", Z=5.0)]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert "G0 G43 Z0.1969 H2" in lines
-
-    def test_a_section_with_no_xy_move_at_all(self, run_post):
-        job = real_job()
-        job[-1].Path.Commands = [cmd("G0", Z=5.0), cmd("G1", Z=0.0,
-                                                       F=ipm(80))]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 G43 Z0.1969 H2") < lines.index("G1 Z0. F80.")
-
-    def test_a_comment_between_the_z_and_the_xy_does_not_flush(self,
-                                                               run_post):
-        job = real_job()
-        job[-1].Path.Commands.insert(1, cmd("(ramp in)"))
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 X3. Y2.874") < lines.index("G43 Z0.1969 H2")
-
-    def test_the_order_holds_without_modal_suppression(self, run_post):
-        lines = run_post(real_job(), "--no-header --no-write-tools "
-                                     "--no-modal")
-        traverse = next(i for i, ln in enumerate(lines) if "X3." in ln)
-        descent = next(i for i, ln in enumerate(lines) if "G43" in ln)
-        assert traverse < descent
-        assert lines[descent].startswith("G0 G43 ")
-
-
-class TestReorderSurvivesStateWords:
-    """State words between the Z rapid and the XY rapid must not defeat it.
-
-    FreeCAD's Drilling op in particular repeats ``G90``/``G98`` inside the
-    path, and a flush on every one of them made the reorder silently do
-    nothing for exactly the operations that plunge.
-    """
-
-    def test_a_plane_or_retract_mode_word_passes_through(self, run_post):
-        job = real_job()
-        job[-1].Path.Commands[1:1] = [cmd("G17"), cmd("G98")]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 X3. Y2.874") < lines.index("G43 Z0.1969 H2")
-
-    def test_the_spindle_word_passes_through(self, run_post):
-        job = real_job()
-        job[-1].Path.Commands[1:1] = [cmd("M3", S=18000)]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 X3. Y2.874") < lines.index("G43 Z0.1969 H2")
-
-    def test_a_work_offset_change_still_flushes(self, run_post):
-        # G55 moves the frame the held back Z would be measured in
-        job = real_job()
-        job[-1].Path.Commands[1:1] = [cmd("G55")]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 G43 Z0.1969 H2") < lines.index("G55")
-
-    def test_a_coordinate_mode_change_still_flushes(self, run_post):
-        job = real_job()
-        job[-1].Path.Commands[1:1] = [cmd("G91")]
-        lines = run_post(job, "--no-header --no-write-tools")
-        assert lines.index("G0 G43 Z0.1969 H2") < lines.index("G91")
+        assert after[3:5] == ["G0 G43 Z5. H2", "X4. Y4."]
 
 
 class TestRealDrillingStream:
     """The shape FreeCAD 1.0's Drilling operation actually emits.
 
     ``G0 Z<clearance>``, then ``G90``, then ``G98``/``G99``, then a
-    ``G0 X Y`` per hole. The restated ``G90`` used to flush the held back Z
-    rapid, so the one operation that always follows a tool change was also
-    the one the reorder never helped.
+    ``G0 X Y`` per hole. The restated ``G90`` and the retract mode must not
+    disturb the blocks around them.
     """
 
     def drilling_job(self, retract="G98"):
@@ -373,16 +211,11 @@ class TestRealDrillingStream:
         ], FakeToolController(2, FakeTool("1/4 Flat", 6.35, 0.0)))
         return job
 
-    def test_xy_is_positioned_before_the_first_hole_descent(self, run_post):
+    def test_freecads_own_approach_order_is_preserved(self, run_post):
+        # clearance, traverse, then the cycle -- exactly as FreeCAD emits it
         lines = run_post(self.drilling_job(), "--no-header --no-write-tools")
         body = lines[lines.index("(DRILLING)"):]
-        assert body.index("G0 X3. Y2.874") < \
-            next(i for i, ln in enumerate(body) if "Z0.5906" in ln)
-
-    def test_the_clearance_rapid_carries_the_tool_length_offset(self,
-                                                                run_post):
-        lines = run_post(self.drilling_job(), "--no-header --no-write-tools")
-        assert "G43 Z0.5906 H2" in lines
+        assert body[2:5] == ["G0 G43 Z0.5906 H2", "G98", "X3. Y2.874"]
 
     def test_a_g99_retract_mode_is_preserved(self, run_post):
         lines = run_post(self.drilling_job("G99"),
@@ -401,11 +234,9 @@ class TestRealDrillingStream:
 class TestMultiPassAdaptive:
     """A real FreeCAD Adaptive operation, stepping down in several passes.
 
-    Pinned against an export from FreeCAD 1.0. Each pass ends with a
-    ``G0 Z<clearance>`` lift, then a comment, then the traverse back to the
-    helix entry and the descent. The lift has to stay where it is -- it is
-    what takes the tool out of the cut -- while the *first* pass still has
-    to be reordered, because the section opens with the clearance rapid.
+    Pinned against an export from FreeCAD 1.0. Every pass goes clearance,
+    traverse, safe height, cut -- FreeCAD positions the tool safely on its
+    own and this post passes that order through untouched.
     """
 
     def job(self):
@@ -446,14 +277,14 @@ class TestMultiPassAdaptive:
         start = lines.index("(ADAPTIVE)")
         return lines[start:lines.index("", start)]
 
-    def test_the_first_pass_positions_xy_before_the_descent(self, run_post):
+    def test_the_first_pass_follows_freecads_order(self, run_post):
         body = self.body(run_post)
-        assert body[2:6] == ["G54", "G0 X2.9999 Y2.8753", "G43 Z0.1969 H2",
+        assert body[2:6] == ["G54", "G0 G43 Z0.1969 H2", "X2.9999 Y2.8753",
                              "Z0.1181"]
 
-    def test_the_lift_between_passes_is_not_reordered(self, run_post):
-        # G0 Z0.1969 takes the tool out of the cut; putting the traverse
-        # first would drag it across the pocket at depth
+    def test_every_pass_lifts_before_it_traverses(self, run_post):
+        # G0 Z0.1969 takes the tool out of the cut before the traverse back
+        # to the helix entry -- FreeCAD's own ordering, passed through
         body = self.body(run_post)
         lift = body.index("G0 Z0.1969")
         assert body[lift + 1] == "(HELIX TO DEPTH -12.700000)"

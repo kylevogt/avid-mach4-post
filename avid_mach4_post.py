@@ -10,8 +10,8 @@ output runs without hand editing.  The conventions it targets:
   (``X0.``, ``Z-1.25``, ``F60.``).
 * Preamble ``G90 G94 G91.1 G40 G49 G17`` followed by ``G20``/``G21``.
 * Tool changes emitted as ``M5`` / coolant off / ``M1`` / ``T<n> M6`` /
-  ``S<rpm> M3`` / work offset, then ``G0 X<x> Y<y>`` and ``G43 Z<z> H<n>``
-  -- XY positioned before the tool comes down.
+  ``S<rpm> M3`` / work offset, with ``G43 H<n>`` established before the
+  first Z move of the new tool.
 * ``G28 G91 Z0.`` + ``G90`` before every tool change and at program end, so
   the spindle is parked at the top of Z when a tool is swapped by hand
   (also ``G30``, ``G53``, or ``none`` -- the AVID Fusion post's own
@@ -46,8 +46,8 @@ __all__ = ["export", "TOOLTIP", "TOOLTIP_ARGS", "UNITS"]
 TOOLTIP = """
 Post processor for AVID CNC machines running Mach4.  The defaults match the
 g-code an AVID/Fusion export contains -- trimmed decimal numbers, M6 tool
-changes with G43 applied after the XY traverse, incremental arc centres and
-an M30 program end -- plus a G28 retract to the top of Z before every tool
+changes with G43 applied before the first Z move, incremental arc centres
+and an M30 program end -- plus a G28 retract to the top of Z before every tool
 change.  Use --safe-retracts none for an AVID/Fusion program with no
 retracts at all.
 
@@ -114,21 +114,11 @@ MODAL_GROUPS = {
 
 WORK_OFFSET_CODES = {"G54", "G55", "G56", "G57", "G58", "G59"}
 
-# Codes that neither move the machine nor change how a coordinate is read,
-# so a Z rapid held back by write_rapid may still cross them.  G90/G91 and
-# the work offsets are deliberately absent: both change what the held back
-# Z word would mean.
 # Unit words the post refuses to pass on.  Every number it writes is
 # already scaled to the unit chosen by --inches/--metric and announced in
 # the preamble; letting a G21 through in an inch program would have Mach4
 # read "X1." as one millimetre.
 UNIT_CODES = {"G20", "G21"}
-
-STATIONARY_CODES = {
-    "G17", "G18", "G19", "G93", "G94", "G98", "G99",
-    "M3", "M03", "M4", "M04", "M5", "M05",
-    "M7", "M07", "M8", "M08", "M9", "M09",
-}
 
 
 # --------------------------------------------------------------------------
@@ -436,22 +426,6 @@ class AvidPost:
         self.current_coolant = "None"
         self.current_work_offset = None
         self.retracted = False
-        # True once X or Y has been commanded since the last retract or tool
-        # change, i.e. the tool is known to be over the work rather than
-        # wherever the previous operation happened to leave it.
-        self.xy_positioned = False
-        # Z-only rapids held back until XY has been positioned; see
-        # :meth:`write_rapid`.
-        self.pending_rapid_z = []
-        # True until the current operation has moved anything.  A tool
-        # change does not put it back: an M6 part way through an operation
-        # is not a section boundary, and the tool is wherever the cut left
-        # it.
-        self.at_section_head = True
-        # False while the tool's Z is not known in work coordinates -- at
-        # program start, and after a retract, whose height is a machine
-        # coordinate this post cannot convert.
-        self.z_known = False
         self.first_section = True
         self.tool_changes = 0
         self.pending_tool_length_offset = False
@@ -494,12 +468,10 @@ class AvidPost:
 
         A real switch invalidates every cached axis word -- an absolute and
         an incremental value are not comparable, so suppressing "the same"
-        word would drop a move -- and any Z rapid being held back, whose
-        meaning the switch would change.
+        word would drop a move.
         """
         text = self.abs_inc_modal.format(code)
         if text:
-            self.flush_pending_rapid_z()
             for output in self.axis_outputs.values():
                 output.reset()
         return text
@@ -536,12 +508,6 @@ class AvidPost:
                 self.retracted = True
         if not words:
             return
-        # a retract ends the section: wherever XY is, it is no longer a
-        # position this program put the tool at deliberately, and Z is at a
-        # machine coordinate with no work-coordinate value
-        self.xy_positioned = False
-        if "Z" in axes:
-            self.z_known = False
 
         if use_g28:
             self.abs_inc_modal.reset()
@@ -620,7 +586,6 @@ class AvidPost:
             self.write_block(block)
 
     def write_postamble(self):
-        self.flush_pending_rapid_z()
         self.write_blank()
         if self.args.dust_collector:
             self.write_block("M9")
@@ -640,12 +605,6 @@ class AvidPost:
     # -- sections -----------------------------------------------------------
     def begin_section(self, operation):
         """Emit the retract, blank line and operation comment for an op."""
-        self.flush_pending_rapid_z()
-        self.at_section_head = True
-        # the tool is wherever the previous operation finished, which is not
-        # a position this one asked for: the next Z descent still has to
-        # wait for the traverse
-        self.xy_positioned = False
         controller = _resolve_controller(operation)
         number = getattr(controller, "ToolNumber", None)
         self.section_tool_number = None if number is None else int(number)
@@ -696,9 +655,7 @@ class AvidPost:
         self.current_work_offset = None
         if self.args.tool_length_offset:
             self.pending_tool_length_offset = True
-        # a tool change invalidates every modal value on the control, and
-        # leaves the spindle wherever the change took place
-        self.xy_positioned = False
+        # a tool change invalidates every modal value on the control
         self.motion_modal.reset()
         self.feed_output.reset()
         for output in self.axis_outputs.values():
@@ -762,15 +719,6 @@ class AvidPost:
             # the preamble already stated the unit this program is written
             # in, and every number is scaled to it
             return
-        if not name.startswith("(") and name not in ("G0", "G00") and \
-                name not in STATIONARY_CODES and \
-                name not in ("G90", "G91"):
-            # anything that moves the machine, or changes what a coordinate
-            # means, ends the window in which a Z rapid may be reordered.
-            # G90/G91 flush through write_absolute_mode, but only when the
-            # mode really changes -- FreeCAD's Drilling op restates G90 in
-            # the middle of its path, between the Z rapid and the traverse.
-            self.flush_pending_rapid_z()
         if name.startswith("("):
             # FreeCAD operations often repeat their own label as the first
             # comment of the path; the section header already carries it
@@ -873,94 +821,7 @@ class AvidPost:
         if code in (2, 3):
             self.write_arc(code, params)
             return
-        if code == 0:
-            self.write_rapid(params)
-            return
         self.write_linear(code, params)
-
-    def write_rapid(self, params):
-        """Emit a rapid, keeping XY positioning ahead of any Z descent.
-
-        A retracted spindle sits at the top of Z somewhere over the table --
-        after a tool change, nowhere in particular.  FreeCAD operations open
-        with ``G0 Z<clearance>`` and only then traverse in XY, which would
-        drop the tool to within a few millimetres of the work *before*
-        crossing to the cut.  The g-code an AVID machine expects positions
-        XY first::
-
-            G0 X3. Y2.874
-            G43 Z0.1969 H2
-
-        so a Z only rapid issued while the tool is parked is held back until
-        the XY rapid that follows it has been emitted.  Nothing is
-        synthesised: the same moves come out, in the safe order.
-
-        Only a *descent* is ever held back.  A Z rapid issued while the tool
-        is still down in the work is the move that lifts it clear and has to
-        go first -- deferring that one would drag the cutter sideways
-        through the material.  Two things say the move is a descent: an
-        explicit retract has happened (``self.retracted``, the only thing
-        that can be known after a ``G28``, whose height is in machine
-        coordinates the post cannot convert), or the commanded Z is simply
-        below where the tool is now.  The second is what makes the reorder
-        work under ``--safe-retracts none``, where nothing ever retracts and
-        the tool sits at the previous operation's clearance height.
-        """
-        has_xy = "X" in params or "Y" in params
-        has_z = "Z" in params
-        parked = has_z and self._may_defer(params["Z"])
-
-        if has_z and not has_xy and parked:
-            self.pending_rapid_z.append(dict(params))
-            return
-
-        if has_z and has_xy and parked:
-            # split so the traverse finishes before the tool comes down; a
-            # pending G43 then hangs off the Z word alone
-            self.write_linear(0, {k: v for k, v in params.items()
-                                  if k != "Z"})
-            self.flush_pending_rapid_z()
-            self.write_linear(0, {"Z": params["Z"]})
-            return
-
-        self.write_linear(0, params)
-        self.flush_pending_rapid_z()
-
-    def _may_defer(self, z):
-        """Whether a Z rapid to ``z`` may wait until XY has been positioned.
-
-        Never once the section has already positioned XY -- by then the
-        rapid is an ordinary move inside the cut.
-        """
-        if self.xy_positioned:
-            return False
-        if self.retracted:
-            # an explicit retract put the tool at the top of travel
-            return True
-        if not self.at_section_head:
-            # a tool change part way through an operation leaves the tool
-            # down in the work
-            return False
-        # no retract to lean on (--safe-retracts none, or g53 before the
-        # first one): hold the move back unless it is the lift that takes
-        # the tool out of the previous operation's cut
-        return not self._is_lift(z)
-
-    def _is_lift(self, z):
-        """True when commanding ``z`` is known to raise the tool."""
-        if not self.z_known:
-            return False
-        if self._is_incremental():
-            return float(z) > 0.0
-        return float(z) > self.position["Z"]
-
-    def flush_pending_rapid_z(self):
-        """Emit any Z rapids :meth:`write_rapid` held back, in order."""
-        if not self.pending_rapid_z:
-            return
-        pending, self.pending_rapid_z = self.pending_rapid_z, []
-        for params in pending:
-            self.write_linear(0, params)
 
     def write_linear(self, code, params):
         if self.pending_tool_length_offset and "Z" in params:
@@ -1210,9 +1071,6 @@ class AvidPost:
             # commanding Z means the tool is no longer parked at the
             # retract plane
             self.retracted = False
-        if "X" in params or "Y" in params:
-            self.xy_positioned = True
-        self.at_section_head = False
         incremental = self._is_incremental()
         for axis in ("X", "Y", "Z"):
             if axis in params and params[axis] is not None:
@@ -1220,8 +1078,6 @@ class AvidPost:
                     self.position[axis] += float(params[axis])
                 else:
                     self.position[axis] = float(params[axis])
-                if axis == "Z":
-                    self.z_known = True
 
     # -- driver -------------------------------------------------------------
     def build(self, objectslist, now=None):
@@ -1237,7 +1093,6 @@ class AvidPost:
             commands = self.begin_section(operation)
             for command in commands:
                 self.parse_command(command)
-            self.flush_pending_rapid_z()
             self.first_section = False
             self.feed_output.reset()
 

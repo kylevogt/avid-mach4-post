@@ -179,17 +179,15 @@ design constraints that keep it that way.
 Always inspect the generated program and dry-run it above the work before
 cutting. This software comes with no warranty; see [LICENSE](LICENSE).
 
-Two things worth knowing about the motion this post emits:
+Things worth knowing about the motion this post emits:
 
-* **While the tool is parked at the retract plane, X and Y are positioned
-  before Z comes down.** FreeCAD's command stream often opens an operation
-  with `G0 Z<clearance>` and only then traverses in XY; emitted in that
-  order the tool would descend to within a few millimetres of the table
-  wherever the spindle happened to be parked, then cross the work at that
-  height. The post reorders those two rapids — it never invents or drops a
-  move. The convention comes from AVID's own output; the reordering that
-  achieves it from FreeCAD's command stream is this post's own work. A Z rapid issued when the tool is *not* parked is the move that
-  lifts it out of the cut, and is left exactly where it is.
+* **The toolpath is FreeCAD's, in FreeCAD's order.** The post reorders
+  nothing: an operation goes to its clearance height, traverses in XY
+  there, drops to its safe height and cuts, exactly as FreeCAD planned it.
+  The only blocks the post *adds* are the retracts below; the only ones it
+  drops command no movement at all. So the clearance and safe heights set
+  on each operation are what keep the tool out of trouble — as they already
+  are for every traverse between operations.
 * **`G43` is applied before any Z move after a tool change** — it rides the
   first plain Z word (rapid or plunge), and is stated on a line of its own
   ahead of a helical arc, a drilling cycle or a probe.

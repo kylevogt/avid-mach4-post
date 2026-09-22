@@ -101,12 +101,18 @@ def avid_fusion_shape():
     """The FreeCAD equivalent of a real AVID/Fusion 360 export.
 
     Pinned against ``2D Adaptive1`` from a program posted by AVID's own
-    Fusion post. Posted with ``--safe-retracts none`` and nothing else --
-    the retract is the one deliberate divergence in the defaults, so this
-    is the file that says whether everything *else* still matches Fusion:
-    the same preamble, the same header (program name, machine if the job
-    names one, tools -- no timestamp), ``G0 X.. Y..`` before
-    ``G43 Z.. H1``, and a bare ``M30`` at the end.
+    Fusion post. Posted with ``--safe-retracts none`` and nothing else, so
+    this is the file that says whether the rest still matches Fusion: the
+    same preamble, the same header (program name, machine if the job names
+    one, tools -- no timestamp), the same tool-change sequence, the same
+    arcs, and a bare ``M30`` at the end.
+
+    Two blocks deliberately do *not* match. Fusion writes the approach as
+    ``G0 X.. Y..`` then ``G43 Z.. H1``, because it is handed the section's
+    initial position and composes the move itself. This post is handed a
+    flat command stream and passes FreeCAD's own order through, so those
+    two come out the other way round. FreeCAD goes to clearance height
+    first and traverses there, which is what the clearance plane is for.
 
     The job deliberately carries no machine information, which is the
     common FreeCAD case and what the reference file shows.
