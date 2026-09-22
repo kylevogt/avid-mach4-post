@@ -293,10 +293,12 @@ machine home in XY, which is a full-width move across the table at
 whatever height Z stopped at — work holding, dust shoes and clamps are all
 in that path, and nothing about the end of a program needs the gantry
 parked. `--home-xy-at-end` asks for the old behaviour and is off by
-default. The XY home block is still pinned end to end by
-`tests/fixtures/line_numbers.tap`, which is posted with
-`--safe-retracts g53 --home-xy-at-end`, so both footers stay covered by a
-golden.
+default. `tests/fixtures/line_numbers.tap` is posted with
+`--safe-retracts g53 --home-xy-at-end` and pins the machine-coordinate XY
+home end to end; the `G28` form of it has no golden and is pinned by
+`TestFooter.test_footer_homes_xy_after_z_when_asked` instead, which asserts
+on the four blocks before `M30`. Every other golden shows the default
+footer.
 
 The Z retract is emitted unconditionally, even when the last operation
 already ended parked at clearance height: that block is what guarantees
