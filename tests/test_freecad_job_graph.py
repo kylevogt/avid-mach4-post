@@ -396,3 +396,79 @@ class TestRealDrillingStream:
         assert "G98" in body  # from the stream, not restated by the cycle
         assert "G81 X3. Y2.874 Z-0.3937 R0.0787 F8." in body
         assert "G0 X4." in body
+
+
+class TestMultiPassAdaptive:
+    """A real FreeCAD Adaptive operation, stepping down in several passes.
+
+    Pinned against an export from FreeCAD 1.0. Each pass ends with a
+    ``G0 Z<clearance>`` lift, then a comment, then the traverse back to the
+    helix entry and the descent. The lift has to stay where it is -- it is
+    what takes the tool out of the cut -- while the *first* pass still has
+    to be reordered, because the section opens with the clearance rapid.
+    """
+
+    def job(self):
+        def helix(z_start, z_end, steps):
+            out, z = [], z_start
+            step = (z_end - z_start) / steps
+            for n in range(steps):
+                z += step
+                up = n % 2 == 0
+                out.append(cmd("G3", Y=79.3623 if up else 73.0326,
+                               Z=z, I=0.0, J=3.1648 if up else -3.1648,
+                               F=ipm(220)))
+            return out
+
+        commands = [cmd("(Adaptive)"), cmd("(Helix to depth -6.350000)"),
+                    cmd("G0", Z=5.0), cmd("G0", X=76.1975, Y=73.0326),
+                    cmd("G0", Z=3.0), cmd("G1", Z=0.0, F=ipm(80))]
+        commands += helix(0.0, -6.35, 8)
+        commands += [cmd("(Adaptive - depth -6.350000)"),
+                     cmd("G1", Y=73.0224, F=ipm(220)),
+                     cmd("G1", X=64.77, Y=50.919),
+                     cmd("G0", Z=5.0),
+                     cmd("(Helix to depth -12.700000)"),
+                     cmd("G0", X=76.1975, Y=73.0326),
+                     cmd("G0", Z=3.0),
+                     cmd("G1", Z=-6.35, F=ipm(80))]
+        commands += helix(-6.35, -12.7, 8)
+        commands += [cmd("G1", Y=73.0224, F=ipm(220)), cmd("G0", Z=5.0)]
+
+        tool = FakeTool('1/4" Flat', 6.35, 0.0)
+        return [FakeJob("Paths Test"), FakeFixtureOp("G54"),
+                FakeToolControllerOp(2, tool, 'TC: 1/4" Flat'),
+                FakeOperation("Adaptive", commands,
+                              FakeToolController(2, tool))]
+
+    def body(self, run_post):
+        lines = run_post(self.job(), "--no-write-tools")
+        start = lines.index("(ADAPTIVE)")
+        return lines[start:lines.index("", start)]
+
+    def test_the_first_pass_positions_xy_before_the_descent(self, run_post):
+        body = self.body(run_post)
+        assert body[2:6] == ["G54", "G0 X2.9999 Y2.8753", "G43 Z0.1969 H2",
+                             "Z0.1181"]
+
+    def test_the_lift_between_passes_is_not_reordered(self, run_post):
+        # G0 Z0.1969 takes the tool out of the cut; putting the traverse
+        # first would drag it across the pocket at depth
+        body = self.body(run_post)
+        lift = body.index("G0 Z0.1969")
+        assert body[lift + 1] == "(HELIX TO DEPTH -12.700000)"
+        assert body[lift + 2] == "X2.9999 Y2.8753"
+        assert body[lift + 3] == "Z0.1181"
+
+    def test_the_offset_is_applied_once(self, run_post):
+        assert len([ln for ln in self.body(run_post) if "G43" in ln]) == 1
+
+    def test_the_plunge_feed_returns_after_each_rapid(self, run_post):
+        # a rapid invalidates the modal feed, so the re-entry plunge has to
+        # restate F80 rather than inherit the helix's F220
+        body = self.body(run_post)
+        assert body.count("G1 Z-0.25 F80.") == 1
+
+    def test_the_helix_feed_is_stated_once_per_pass(self, run_post):
+        body = self.body(run_post)
+        assert len([ln for ln in body if "F220." in ln]) == 2
