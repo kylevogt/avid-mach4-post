@@ -642,6 +642,10 @@ class AvidPost:
         """Emit the retract, blank line and operation comment for an op."""
         self.flush_pending_rapid_z()
         self.at_section_head = True
+        # the tool is wherever the previous operation finished, which is not
+        # a position this one asked for: the next Z descent still has to
+        # wait for the traverse
+        self.xy_positioned = False
         controller = _resolve_controller(operation)
         number = getattr(controller, "ToolNumber", None)
         self.section_tool_number = None if number is None else int(number)

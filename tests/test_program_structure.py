@@ -250,6 +250,27 @@ class TestNoSafeRetracts:
         tail = lines[lines.index("(B)"):]
         assert tail[1:3] == ["G0 Z0.6", "X3. Y3."]
 
+    def test_a_descent_at_a_section_head_still_waits_for_the_traverse(
+            self, run_post):
+        # the previous operation left the tool clear of the work but at its
+        # own XY; descending first would drop to the new clearance height
+        # over the *old* position and then cross the job at that height
+        first = FakeOperation("A", [
+            cmd("M6", T=1), cmd("M3", S=12000),
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", Z=-6.35, F=mmpm(1000)),
+            cmd("G0", Z=15.24),
+        ], FakeToolController(1))
+        second = FakeOperation("B", [
+            cmd("G0", Z=5.08),
+            cmd("G0", X=76.2, Y=76.2),
+            cmd("G1", Z=-6.35, F=mmpm(1000)),
+        ], FakeToolController(1))
+        lines = run_post([first, second],
+                         "--no-write-tools --safe-retracts none")
+        tail = lines[lines.index("(B)"):]
+        assert tail[1:3] == ["X3. Y3.", "Z0.2"]
+
     def test_a_mid_section_tool_change_lifts_first(self, run_post):
         operation = FakeOperation("Custom", [
             cmd("M6", T=1), cmd("M3", S=12000),
