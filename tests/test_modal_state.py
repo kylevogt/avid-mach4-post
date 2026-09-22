@@ -351,3 +351,39 @@ class TestRadiusArcsOutsideG17:
             cmd("G2", X=25.4, Z=-25.4, I=12.7, K=-12.7, F=mmpm(1016)),
         ], "--no-header --no-write-tools --radius-arcs")
         assert out[-1] == "G2 X1. Z-1. I0.5 K-0.5 F40."
+
+
+class TestRadiusArcsFromTheStream:
+    def test_an_r_arc_is_not_turned_into_a_zero_radius_arc(self, run_post):
+        # I/J defaulted to 0 and R was ignored, so an arc described by its
+        # radius came out as G2 X.. Y.. I0. J0.
+        out = run(run_post, [
+            cmd("G0", X=0, Y=0),
+            cmd("G2", X=25.4, Y=25.4, R=25.4, F=mmpm(1016)),
+        ])
+        assert out[-1] == "G2 X1. Y1. R1. F40."
+
+    def test_an_ijk_arc_is_still_ijk(self, run_post):
+        out = run(run_post, [
+            cmd("G0", X=0, Y=0),
+            cmd("G2", X=25.4, Y=25.4, I=25.4, J=0, F=mmpm(1016)),
+        ])
+        assert out[-1] == "G2 X1. Y1. I1. J0. F40."
+
+
+class TestToolLengthOffsetFromTheStream:
+    def test_an_explicit_g43_reframes_z(self, run_post):
+        # G43 H9 moves the Z frame, so the identical Z that follows is a
+        # real move and must not be suppressed
+        out = run(run_post, [
+            cmd("G0", X=25.4, Y=25.4), cmd("G0", Z=5.0),
+            cmd("G43", H=9), cmd("G0", Z=5.0),
+        ])
+        assert out[-2:] == ["G43 H9", "Z0.1969"]
+
+    def test_g49_reframes_z_too(self, run_post):
+        out = run(run_post, [
+            cmd("G0", X=25.4, Y=25.4), cmd("G0", Z=5.0),
+            cmd("G49"), cmd("G0", Z=5.0),
+        ])
+        assert out[-2:] == ["G49", "Z0.1969"]

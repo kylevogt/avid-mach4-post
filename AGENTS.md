@@ -99,11 +99,22 @@ Consequences that have already bitten once, all covered by
   standalone `G43 H<n>` first. If you add another path that emits Z, wire it
   up too.
 * **`write_absolute_mode()` is the only way to emit `G90`/`G91`.** A real
-  change of coordinate mode invalidates every cached axis word *and* any Z
-  rapid being held back; a restated `G90` that changes nothing must do
-  neither, because FreeCAD's Drilling op restates `G90` in the middle of
-  its path, between the opening `G0 Z<clearance>` and the first traverse.
-  `TestRealDrillingStream` pins that exact stream.
+  change of coordinate mode invalidates every cached axis word; a restated
+  `G90` that changes nothing must not, because FreeCAD's Drilling op
+  restates `G90` in the middle of its path. `TestRealDrillingStream` pins
+  that exact stream.
+* **Anything that moves the coordinate frame invalidates the cached axis
+  words.** A cached word is only safe to suppress while it still means the
+  same physical place. `write_work_offset` resets the axis outputs on a
+  change of fixture, `write_absolute_mode` on a G90/G91 switch, and the
+  `G43`/`G49` branch resets `z_output`. Miss one and a move that really is
+  a move gets dropped — that is how a G55 job once plunged at the G54
+  part's location. See `TestWorkOffsets`.
+* **The fixture the job selected is restated after a tool change, not
+  `G54`.** FreeCAD puts the Fixture pseudo op *before* the ToolController,
+  so a hard-coded `G54` fallback there silently moved the whole program
+  onto the wrong fixture. `active_work_offset` remembers what the stream
+  asked for; `G54` is only the fallback when it never asked.
 * **A `G20`/`G21` in the command stream is dropped** (`UNIT_CODES`). Every
   number the post writes is already scaled to the unit chosen by
   `--inches`/`--metric` and announced in the preamble; passing a unit word

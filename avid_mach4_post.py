@@ -112,7 +112,9 @@ MODAL_GROUPS = {
     "G98": "retract_modal", "G99": "retract_modal",
 }
 
-WORK_OFFSET_CODES = {"G54", "G55", "G56", "G57", "G58", "G59"}
+WORK_OFFSET_CODES = {"G54", "G55", "G56", "G57", "G58", "G59"} | {
+    f"G59.{n}" for n in range(1, 10)
+}
 
 # Unit words the post refuses to pass on.  Every number it writes is
 # already scaled to the unit chosen by --inches/--metric and announced in
@@ -348,10 +350,15 @@ TOOLTIP_ARGS = PARSER.format_help()
 
 
 def process_arguments(argstring):
-    """Parse ``argstring`` and return the namespace, or ``None`` on error."""
+    """Parse ``argstring`` and return the namespace, or ``None`` on error.
+
+    ``shlex`` raises on an unbalanced quote, which reaches FreeCAD as a
+    traceback rather than as "your arguments are wrong"; both failures are
+    reported the same way.
+    """
     try:
         return PARSER.parse_args(shlex.split(argstring or ""))
-    except SystemExit:
+    except (SystemExit, ValueError):
         return None
 
 
@@ -425,6 +432,10 @@ class AvidPost:
         self.current_tool = None
         self.current_coolant = "None"
         self.current_work_offset = None
+        # the offset the command stream last asked for.  A tool change
+        # clears current_work_offset to force the word back out, but must
+        # not lose which offset the job is actually running in.
+        self.active_work_offset = None
         self.retracted = False
         self.first_section = True
         self.tool_changes = 0
@@ -673,23 +684,30 @@ class AvidPost:
         return first if first != tool_number else None
 
     def write_work_offset(self, code=None, p=None):
-        """Emit G54..G59 (optionally ``G59 P<n>``) when it changes.
+        """Emit the work offset when the control does not already have it.
 
-        Called with no arguments before the first motion of a section:
-        G54 is the default when the job never specified an offset.
+        Called with no arguments before the first motion of a section, to
+        restate whatever offset the job is running in -- a tool change
+        clears the control's copy.  ``G54`` is the fallback only when the
+        command stream never named one; restating a hard-coded ``G54``
+        there would silently move a G55 job onto the G54 fixture.
         """
         if code is None:
             if self.current_work_offset is not None:
                 return
-            code = "G54"
-        key = code if p is None else f"{code} P{self.int_format.format(p)}"
+            key = self.active_work_offset or "G54"
+        else:
+            key = code if p is None else \
+                f"{code} P{self.int_format.format(p)}"
+            self.active_work_offset = key
         if key == self.current_work_offset:
             return
+        # the cached axis words belong to the old fixture: the same numbers
+        # are a different place now, so none of them may be suppressed
+        for output in self.axis_outputs.values():
+            output.reset()
         self.current_work_offset = key
-        if p is None:
-            self.write_block(code)
-        else:
-            self.write_block(code, "P" + self.int_format.format(p))
+        self.write_block(*key.split(" "))
 
     def flush_coolant(self):
         if self.pending_coolant is None:
@@ -764,9 +782,15 @@ class AvidPost:
         if name in ("G4", "G04", "G04.1"):
             self.write_dwell(params)
             return
-        if name in ("G43",):
+        if name in ("G43", "G49"):
+            # the Z frame moves under the program's feet; a cached Z word
+            # is no longer the height it was
             self.pending_tool_length_offset = False
-            self.write_block("G43", self._h_word(params))
+            self.z_output.reset()
+            if name == "G49":
+                self.write_block("G49")
+            else:
+                self.write_block("G43", self._h_word(params))
             return
         if name in WORK_OFFSET_CODES:
             self.write_work_offset(name, params.get("P"))
@@ -918,7 +942,11 @@ class AvidPost:
             words.extend(self._coordinate_words(params))
 
         in_xy_plane = self.plane_modal.get_current() in (None, "G17")
-        if self.args.radius_arcs and not full_circle and in_xy_plane:
+        if "R" in params and "I" not in params and "J" not in params:
+            # the path describes the arc by its radius; inventing I0. J0.
+            # from the missing centre would make it a zero radius arc
+            words.append("R" + self.xyz_format.format(params["R"]))
+        elif self.args.radius_arcs and not full_circle and in_xy_plane:
             radius = math.hypot(i, j)
             sweep = _arc_sweep(start["X"], start["Y"], start["X"] + i,
                                start["Y"] + j, end_x, end_y, code == 2)
@@ -1081,9 +1109,10 @@ class AvidPost:
 
     # -- driver -------------------------------------------------------------
     def build(self, objectslist, now=None):
-        operations = [obj for obj in objectslist if _is_path_object(obj)
-                      and getattr(obj, "Active", True) is not False]
         job = _find_job(objectslist)
+        operations = [obj for obj in objectslist if _is_path_object(obj)
+                      and getattr(obj, "Active", True) is not False
+                      and obj is not job]
         self.tool_numbers = [t["number"] for t in collect_tools(operations)]
 
         self.write_header(job, operations, now=now)

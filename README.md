@@ -70,10 +70,13 @@ deliberate exception — retracts:
 Matching Fusion: inches and `G20`, the `G90 G94 G91.1 G40 G49 G17`
 preamble, a header of program name + machine (only if the job names one) +
 tool table and no timestamp, `M5` / `T<n> M6` / `S<rpm> M3` / work offset /
-`G0 X<x> Y<y>` / `G43 Z<z> H<n>` at each tool change, `I`/`J` arcs, and
-`M30`. [`tests/fixtures/avid_fusion_shape.tap`](tests/fixtures/avid_fusion_shape.tap)
+`G43 H<n>` at each tool change, `I`/`J` arcs, and `M30`.
+[`tests/fixtures/avid_fusion_shape.tap`](tests/fixtures/avid_fusion_shape.tap)
 is pinned to a real AVID/Fusion export and reproduced with
-`--safe-retracts none` and nothing else.
+`--safe-retracts none` and nothing else. The one thing it does *not*
+reproduce is the approach: Fusion writes `G0 X.. Y..` then `G43 Z.. H1`
+because it composes the move from the section's start point, while this
+post passes FreeCAD's own clearance-first order through.
 
 ### Retracts
 
@@ -140,8 +143,8 @@ S12000 M3
 
 (ADAPTIVE)
 G54
-G0 X3. Y2.874
-G43 Z0.1969 H2
+G0 G43 Z0.1969 H2
+X3. Y2.874
 Z0.1181
 G1 Z0. F80.
 G3 Y3.126 Z-0.0311 I0. J0.1248 F200.
@@ -191,6 +194,9 @@ Things worth knowing about the motion this post emits:
 * **`G43` is applied before any Z move after a tool change** — it rides the
   first plain Z word (rapid or plunge), and is stated on a line of its own
   ahead of a helical arc, a drilling cycle or a probe.
+* **The work offset the job selected is the one it runs in.** A tool change
+  makes the post restate it, and a change of fixture restates every axis
+  word, so no move is suppressed across a shift of coordinate frame.
 * **Every operation starts in `G90`**, so one operation cannot leave the
   next one issuing incremental moves, and no cached coordinate survives a
   change of coordinate mode.

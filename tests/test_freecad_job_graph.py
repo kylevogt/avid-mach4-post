@@ -303,3 +303,60 @@ class TestMultiPassAdaptive:
     def test_the_helix_feed_is_stated_once_per_pass(self, run_post):
         body = self.body(run_post)
         assert len([ln for ln in body if "F220." in ln]) == 2
+
+
+class TestWorkOffsets:
+    """The fixture the job selected has to survive the whole program.
+
+    FreeCAD puts the Fixture pseudo operation *before* the ToolController,
+    so the offset is already on the control when the first M6 arrives. A
+    tool change clears the control's copy, and what gets restated after it
+    decides which physical location every later move goes to.
+    """
+
+    def job(self, code="G55", ops=1):
+        tool = FakeTool("Flat")
+        body = [cmd("G0", Z=5.0), cmd("G0", X=25.4, Y=25.4),
+                cmd("G1", Z=-3.0, F=ipm(40))]
+        out = [FakeJob("J"), FakeFixtureOp(code),
+               FakeToolControllerOp(1, tool, "TC: Flat")]
+        for n in range(ops):
+            out.append(FakeOperation(f"Rough{n}", list(body),
+                                     FakeToolController(1, tool)))
+        return out
+
+    def test_a_g55_job_is_not_moved_onto_g54(self, run_post):
+        lines = run_post(self.job("G55"), "--no-write-tools")
+        assert "G54" not in lines
+        assert lines.count("G55") == 2   # the fixture, and after the M6
+
+    def test_an_extended_offset_survives_too(self, run_post):
+        lines = run_post(self.job("G59.1"), "--no-write-tools")
+        assert "G54" not in lines
+        assert lines.count("G59.1") == 2
+
+    def test_g54_is_still_the_fallback_when_none_is_named(self, run_post):
+        job = self.job()
+        del job[1]                        # no Fixture pseudo operation
+        lines = run_post(job, "--no-write-tools")
+        assert "G54" in lines
+
+    def test_a_second_fixture_restates_every_axis(self, run_post):
+        # a closed profile ends where it started, so without the reset the
+        # approach to the *second* fixture is suppressed and the tool
+        # plunges at the first part's location
+        tool = FakeTool("Flat")
+
+        def profile():
+            return FakeOperation("Profile", [
+                cmd("G0", Z=15.0), cmd("G0", X=0.0, Y=0.0),
+                cmd("G1", Z=-3.0, F=ipm(40)),
+                cmd("G1", X=50.0, F=ipm(80)), cmd("G1", X=0.0),
+                cmd("G0", Z=15.0)], FakeToolController(1, tool))
+
+        lines = run_post([FakeJob("J"), FakeFixtureOp("G54"),
+                          FakeToolControllerOp(1, tool, "TC: Flat"),
+                          profile(), FakeFixtureOp("G55"), profile()],
+                         "--no-write-tools")
+        tail = [ln for ln in lines[lines.index("G55"):] if ln]
+        assert tail[1:4] == ["(PROFILE)", "Z0.5906", "X0. Y0."]
