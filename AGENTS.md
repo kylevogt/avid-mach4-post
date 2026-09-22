@@ -284,6 +284,23 @@ mode, a retract moves **Z in a block of its own**, before any XY move.
 Do not change the `--safe-retracts` default without saying so in the PR
 description: it decides where a manual tool change happens.
 
+## The end of the program
+
+The footer retracts **Z only**. It used to follow that with a traverse to
+machine home in XY, which is a full-width move across the table at
+whatever height Z stopped at — work holding, dust shoes and clamps are all
+in that path, and nothing about the end of a program needs the gantry
+parked. `--home-xy-at-end` asks for the old behaviour and is off by
+default. The XY home block is still pinned end to end by
+`tests/fixtures/line_numbers.tap`, which is posted with
+`--safe-retracts g53 --home-xy-at-end`, so both footers stay covered by a
+golden.
+
+The Z retract is emitted unconditionally, even when the last operation
+already ended parked at clearance height: that block is what guarantees
+the tool is clear, and it is not worth making it depend on the post's own
+position tracking.
+
 ## Safety note
 
 This post produces g-code that drives a machine capable of injuring people

@@ -15,7 +15,8 @@ output runs without hand editing.  The conventions it targets:
 * ``G28 G91 Z0.`` + ``G90`` before every tool change and at program end, so
   the spindle is parked at the top of Z when a tool is swapped by hand
   (also ``G30``, ``G53``, or ``none`` -- the AVID Fusion post's own
-  behaviour with ``useG28`` off).
+  behaviour with ``useG28`` off).  A retract moves Z only; the program ends
+  with the tool over the work unless ``--home-xy-at-end`` is given.
 * Arcs in incremental ``I``/``J``/``K`` form, optionally as ``R``.
 * Optional dust collector support (``M7`` in the header, ``M9`` in the footer).
 * Program end with ``M30``.
@@ -285,6 +286,10 @@ def _build_parser():
     flag("radius-arcs", "radius_arcs", False,
          "emit arcs using an R word",
          "emit arcs using I/J/K (default)")
+    flag("home-xy-at-end", "home_xy_at_end", False,
+         "traverse to machine home in XY at program end",
+         "leave the tool where it is in XY at program end, retracting Z "
+         "only (default)")
     flag("dust-collector", "dust_collector", False,
          "M7 in the header and M9 in the footer for the dust collector",
          "no dust collector codes (default)")
@@ -622,12 +627,17 @@ class AvidPost:
         elif self.current_coolant != "None":
             self.write_block("M9")
             self.current_coolant = "None"
-        # unconditionally, even if the last operation ended parked: this is
-        # the block that guarantees the tool is clear before the machine
-        # traverses to home, and it costs one redundant line to not have to
-        # trust the post's own position tracking here
+        # unconditionally, even if the last operation ended parked: it
+        # costs one redundant line to not have to trust the post's own
+        # position tracking for the block that leaves the tool clear of
+        # the work
         self.write_retract("Z")
-        self.write_retract("X", "Y")
+        # XY is left alone by default: a traverse to machine home at the
+        # end of the program is a full width move across the table at
+        # whatever height Z stopped at, and there is usually work holding
+        # in the way.  Retracting Z and staying put is the safer end state.
+        if self.args.home_xy_at_end:
+            self.write_retract("X", "Y")
         for block in _split_blocks(self.args.postamble):
             self.write_block(block)
         self.write_block("M30")

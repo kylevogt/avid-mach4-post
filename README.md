@@ -82,17 +82,23 @@ post passes FreeCAD's own clearance-first order through.
 
 `--safe-retracts g28` puts `G28 G91 Z0.` / `G90` before every tool change,
 so the spindle is parked at the top of Z when you swap a tool by hand
-rather than sitting a few millimetres above the work. It also parks Z and
-sends X/Y to machine home at program end. This assumes Mach4's G28 position
-is machine zero, which on an AVID is the top of Z after homing — **check
-that on your machine before the first cut.**
+rather than sitting a few millimetres above the work. It parks Z the same
+way at program end. This assumes Mach4's G28 position is machine zero,
+which on an AVID is the top of Z after homing — **check that on your
+machine before the first cut.**
 
 | Mode | What it emits |
 | --- | --- |
-| `g28` (default) | `G28 G91 Z0.` / `G90` before every tool change, then `G28 G91 X0. Y0.` / `G90` at the end |
+| `g28` (default) | `G28 G91 Z0.` / `G90` before every tool change and at program end |
 | `g30` | the same through `G30` |
-| `g53` | `G53 G0 Z<--home-z>`, then `G53 G0 X<--home-x> Y<--home-y>` |
+| `g53` | `G53 G0 Z<--home-z>` |
 | `none` | nothing — what AVID's Fusion post does with `useG28` off |
+
+Retracts move **Z only**. The program ends with the tool lifted but still
+over the work in X/Y, because a traverse to machine home crosses the whole
+table at whatever height Z stopped at and clamps, vises and dust shoes tend
+to be in the way. `--home-xy-at-end` adds that move back (`G28 G91 X0. Y0.`
+/ `G90`, or `G53 G0 X<--home-x> Y<--home-y>`) after the final Z retract.
 
 `--safe-retracts none` is the setting that matches an AVID/Fusion program
 exactly: no `G28` after the preamble, no move to machine home before `M30`,
@@ -108,6 +114,7 @@ Common adjustments:
 | `--safe-retracts g53` | machine-coordinate retracts, no `G28`/`G30` |
 | `--header` | add a generated-by and timestamp header |
 | `--home-z -25.4` | Z machine position `--safe-retracts g53` retracts to |
+| `--home-xy-at-end` | traverse to machine home in X/Y after the final Z retract |
 | `--dust-collector` | `M7` in the header, `M9` in the footer |
 | `--line-numbers` | prefix every block with an `N` word |
 | `--radius-arcs` | emit arcs as `R` instead of `I`/`J`/`K` |
@@ -152,8 +159,6 @@ G1 Y2.874
 G0 Z0.1969
 
 G28 G91 Z0.
-G90
-G28 G91 X0. Y0.
 G90
 M30
 ```

@@ -199,7 +199,7 @@ class TestCoolant:
     def test_coolant_is_turned_off_at_program_end(self, run_post):
         lines = run_post(op("Contour", 1, coolant="Flood"),
                          "--no-write-tools")
-        assert lines[lines.index("M30") - 5] == "M9"
+        assert lines[lines.index("M30") - 3] == "M9"
 
     def test_coolant_translation_can_be_disabled(self, run_post):
         lines = run_post(op("Contour", 1, coolant="Flood"),
@@ -212,7 +212,7 @@ class TestDustCollector:
         lines = run_post(op("Contour", 1, coolant="Flood"),
                          "--no-write-tools --dust-collector")
         assert lines.index("M7") < lines.index("(CONTOUR)")
-        assert lines[lines.index("M30") - 5] == "M9"
+        assert lines[lines.index("M30") - 3] == "M9"
 
     def test_operation_coolant_is_ignored(self, run_post):
         lines = run_post(op("Contour", 1, coolant="Flood"),
