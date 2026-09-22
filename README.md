@@ -103,7 +103,6 @@ Common adjustments:
 | Argument | Effect |
 | --- | --- |
 | `--metric` | output millimetres and `G21` instead of inches and `G20` |
-| `--no-rapid-feeds` | ignore the tool controller's rapid rates, always emit `G0` |
 | `--safe-retracts none` | no retracts at all — matches AVID's Fusion output |
 | `--safe-retracts g30` | retract via `G30` |
 | `--safe-retracts g53` | machine-coordinate retracts, no `G28`/`G30` |
@@ -195,12 +194,10 @@ Things worth knowing about the motion this post emits:
 * **`G43` is applied before any Z move after a tool change** — it rides the
   first plain Z word (rapid or plunge), and is stated on a line of its own
   ahead of a helical arc, a drilling cycle or a probe.
-* **Rapid rates in the tool controller are obeyed.** `G0` ignores `F`, so a
-  rapid normally runs at whatever the machine's motor tuning says. If the
-  Job's tool controller sets both `HorizRapid` and `VertRapid`, those moves
-  go out as `G1` at that rate instead — vertical rate when the block moves
-  Z, horizontal otherwise. It only ever makes a move slower. Leave both
-  unset, or pass `--no-rapid-feeds`, to get plain `G0` at machine rapid.
+* **Rapids stay rapids.** `G0` carries no speed, so those moves run at the
+  rate Mach4's motor tuning gives them. The rapid values in FreeCAD's tool
+  controller are not used and do not need setting — they only affect
+  FreeCAD's own cycle-time estimate and simulator.
 * **The work offset the job selected is the one it runs in.** A tool change
   makes the post restate it, and a change of fixture restates every axis
   word, so no move is suppressed across a shift of coordinate frame.

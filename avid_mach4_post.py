@@ -288,11 +288,6 @@ def _build_parser():
     flag("dust-collector", "dust_collector", False,
          "M7 in the header and M9 in the footer for the dust collector",
          "no dust collector codes (default)")
-    flag("rapid-feeds", "rapid_feeds", True,
-         "when the tool controller gives a rapid rate, emit rapids as G1 at "
-         "that rate instead of G0 at the machine's own rapid (default)",
-         "always emit rapids as G0, at whatever rate the control is "
-         "configured for")
     flag("coolant", "coolant", True,
          "translate the operation coolant mode into M7/M8/M9 (default)",
          "ignore the operation coolant mode")
@@ -456,9 +451,6 @@ class AvidPost:
         self.tool_numbers = []
         self.section_comment = None
         self.section_tool_number = None
-        # the current operation's rapid rates, in FreeCAD's mm/s
-        self.section_horiz_rapid = None
-        self.section_vert_rapid = None
 
     # -- low level output ---------------------------------------------------
     def write(self, text):
@@ -646,10 +638,6 @@ class AvidPost:
         controller = _resolve_controller(operation)
         number = getattr(controller, "ToolNumber", None)
         self.section_tool_number = None if number is None else int(number)
-        self.section_horiz_rapid = _quantity_value(
-            getattr(controller, "HorizRapid", None))
-        self.section_vert_rapid = _quantity_value(
-            getattr(controller, "VertRapid", None))
         commands = list(iter_commands(operation))
         tool_change = any(_command_name(c) in ("M6", "M06") for c in commands)
         if (tool_change or self.first_section) and not self.retracted:
@@ -877,36 +865,7 @@ class AvidPost:
         if code in (2, 3):
             self.write_arc(code, params)
             return
-        if code == 0:
-            rate = self._rapid_rate(params)
-            if rate is not None:
-                # the operation asked for a rapid rate, and G0 has no way to
-                # carry one: the only way to honour it is a feed move
-                params = dict(params, F=rate)
-                code = 1
         self.write_linear(code, params)
-
-    def _rapid_rate(self, params):
-        """Feed a rapid should run at, or ``None`` to leave it a ``G0``.
-
-        ``G0`` ignores ``F`` by definition, so a machine runs every rapid at
-        whatever its motor tuning says.  When the Job's tool controller
-        states rapid rates, the operator has asked for something slower than
-        that, and the only way to deliver it is to emit the move as ``G1``.
-        Which rate applies is decided the way FreeCAD's own mach3/mach4 post
-        decides it: vertical if the block moves Z, horizontal otherwise.
-
-        Both rates have to be set.  With only one of them the other would
-        have to be invented, and inventing a rapid rate is how a traverse
-        ends up slower or faster than anyone intended.
-        """
-        if not self.args.rapid_feeds:
-            return None
-        horizontal = self.section_horiz_rapid
-        vertical = self.section_vert_rapid
-        if not horizontal or not vertical:
-            return None
-        return vertical if "Z" in params else horizontal
 
     def write_linear(self, code, params):
         if self.pending_tool_length_offset and "Z" in params:
@@ -930,12 +889,12 @@ class AvidPost:
 
         coords = self._coordinate_words(params)
         if not coords:
-            # the block commands no movement.  Nothing is emitted, so
-            # nothing about the control's state has changed: claiming motion
-            # group 1 here would let the *next* block inherit a mode the
-            # machine was never put into, and consuming the feed would turn
-            # a rapid FreeCAD emits with no axis words at all -- it emits
-            # bare "G0" commands -- into a stray "F400." block.
+            # the block commands no movement, so nothing is emitted and
+            # nothing about the control's state has changed.  Claiming
+            # motion group 1 here would let the *next* block inherit a mode
+            # the machine was never put into, and consuming the feed would
+            # leave a stray "F220." block behind -- FreeCAD really does emit
+            # bare "G0" commands with no axis words at all.
             return
         feed = self._feed_word(params) if code != 0 else ""
         words = [self._motion_word(code)] + coords

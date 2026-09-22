@@ -110,23 +110,23 @@ Consequences that have already bitten once, all covered by
 * Several sections can open before anything moves, so the start-up retract
   must be suppressed when the tool is already parked (`self.retracted`,
   cleared whenever Z is commanded).
-* **Rapid rates are honoured by emitting `G1`** (`--rapid-feeds`, on by
-  default). `G0` ignores `F` by definition, so a machine runs every rapid at
-  whatever its motor tuning says. When the Job's tool controller states
-  `HorizRapid` *and* `VertRapid`, the operator has asked for something
-  slower, and the only way to deliver it is a feed move. Which rate applies
-  is decided the way FreeCAD's own mach3/mach4 post decides it: vertical if
-  the block moves Z, horizontal otherwise, read straight off the controller
-  rather than from FreeCAD's modal `F` (which it only restates on change,
-  and then across operation boundaries). **Both rates must be set** — with
-  one, the other would have to be invented.
-
-  This is the one thing the post changes about a move, and it only ever
-  makes it slower. It is also the reason `write_linear` must return before
-  consuming the feed when a block commands no movement: FreeCAD emits bare
-  `G0` commands with no axis words at all, and converting one of those
-  produced a stray `F400.` block that moved the modal feed with nothing to
-  show for it. See `TestRapidRates`.
+* **`F` is never emitted on a rapid, and a tool controller's rapid rates
+  are ignored.** `G0` has no way to carry a speed — the machine runs it at
+  whatever its motor tuning says, which is where rapid rate belongs. An
+  earlier version converted `G0` to `G1` at the controller's rate to honour
+  it; that was removed deliberately, because it made every positioning move
+  answer to the feed override and bought nothing Mach4 was not already
+  doing. Note FreeCAD *does* put an `F` on rapids (`F:0` when the rates are
+  unset, the rate itself when they are set) — dropping it is deliberate,
+  and emitting it would set the modal feed to a rapid rate or to zero.
+* **A block that commands no movement is never emitted, feed included.**
+  FreeCAD emits bare `G0` commands with no axis words at all, and `G0 Z<x>`
+  where Z is already at x — 11 such blocks in a real three-operation
+  export. `write_linear` returns before consuming the feed so no stray
+  `F220.` line is left behind. Safe because FreeCAD states `F` on *every*
+  cutting move (1718 of 1718 in that export); if that ever stops being
+  true, the feed has to be carried forward instead. See
+  `TestBlocksThatMoveNothing`.
 * **FreeCAD's motion order is passed through untouched.** An operation goes
   to `ClearanceHeight`, traverses in XY *there*, drops to `SafeHeight` and
   cuts; between passes it lifts back to clearance before traversing again.
@@ -248,9 +248,8 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 * Prefer translating FreeCAD's existing command stream over synthesising
   motion. The post is a formatter plus a small state machine, not a CAM
   kernel. It emits the same moves, at the same coordinates, in the same
-  order as the path it was given. The only blocks it adds are retracts; the
-  only ones it drops command no movement; and the only thing it changes
-  about a move is a rapid's *speed*, when the tool controller asks for one.
+  order as the path it was given. The only blocks it adds are retracts, and
+  the only ones it drops command no movement. It never changes a move.
 * New user-facing options go through `_build_parser()` as a paired
   `--flag` / `--no-flag` (via the local `flag()` helper) so FreeCAD's
   post-processor argument box behaves predictably.
