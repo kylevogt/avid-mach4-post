@@ -110,11 +110,24 @@ class TestFooter:
         lines = run_post(simple_op(), "--safe-retracts none")
         assert lines[-2:] == ["", "M30"]
 
-    def test_footer_retracts_z_then_xy(self, run_post):
+    def test_footer_retracts_z_and_leaves_xy_alone(self, run_post):
+        # a traverse to machine home at the end of the program crosses the
+        # whole table and can find work holding on the way
         lines = run_post(simple_op())
+        end = lines.index("M30")
+        assert lines[end - 2:end] == ["G28 G91 Z0.", "G90"]
+        assert "G28 G91 X0. Y0." not in lines
+
+    def test_footer_homes_xy_after_z_when_asked(self, run_post):
+        lines = run_post(simple_op(), "--home-xy-at-end")
         end = lines.index("M30")
         assert lines[end - 4:end] == [
             "G28 G91 Z0.", "G90", "G28 G91 X0. Y0.", "G90"]
+
+    def test_home_xy_at_end_emits_nothing_without_retracts(self, run_post):
+        lines = run_post(simple_op(),
+                         "--safe-retracts none --home-xy-at-end")
+        assert lines[-2:] == ["", "M30"]
 
 
 class TestSafeRetracts:
@@ -132,13 +145,14 @@ class TestSafeRetracts:
         lines = run_post(simple_op(), "--no-header --safe-retracts g53")
         assert not any(line.startswith("G28") for line in lines)
         assert "G53 G0 Z0." in lines
-        assert "G53 G0 X0. Y0." in lines
+        assert "G53 G0 X0. Y0." not in lines
 
     def test_g53_lifts_z_before_it_traverses_to_machine_home(self,
                                                              run_post):
         # the footer used to send the tool to machine home in XY at
         # whatever depth the last operation stopped at
-        lines = run_post(simple_op(), "--no-header --safe-retracts g53")
+        lines = run_post(simple_op(),
+                         "--no-header --safe-retracts g53 --home-xy-at-end")
         cut = max(i for i, ln in enumerate(lines) if ln.startswith("G1 Z-"))
         assert lines.index("G53 G0 Z0.", cut) < \
             lines.index("G53 G0 X0. Y0.")
@@ -146,8 +160,8 @@ class TestSafeRetracts:
     def test_g53_honours_configured_home(self, run_post):
         lines = run_post(
             simple_op(),
-            "--no-header --safe-retracts g53 --home-x 25.4 --home-y 50.8"
-            " --home-z -25.4")
+            "--no-header --safe-retracts g53 --home-xy-at-end"
+            " --home-x 25.4 --home-y 50.8 --home-z -25.4")
         assert "G53 G0 X1. Y2." in lines
         assert "G53 G0 Z-1." in lines
 

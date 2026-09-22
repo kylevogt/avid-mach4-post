@@ -258,9 +258,9 @@ class TestPassthrough:
         lines = run_post(motion_op([cmd("G90"), cmd("G21"), cmd("G90")]),
                          "--no-write-tools --metric")
         # the stream's own G90s change nothing and its unit word is dropped
-        # outright; the three G90 lines all come from retracts restoring
+        # outright; the two G90 lines both come from retracts restoring
         # absolute mode after their G91 block
-        assert lines.count("G90") == 3
+        assert lines.count("G90") == 2
         assert lines.count("G21") == 1
 
 

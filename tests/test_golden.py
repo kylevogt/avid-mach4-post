@@ -153,7 +153,8 @@ def generate(argstring):
     ("imperial.tap", ""),
     ("metric.tap", "--metric"),
     ("header.tap", "--header"),
-    ("line_numbers.tap", "--line-numbers --safe-retracts g53"),
+    ("line_numbers.tap",
+     "--line-numbers --safe-retracts g53 --home-xy-at-end"),
 ])
 def test_matches_reference_program(name, argstring):
     _assert_matches(generate(argstring), name)

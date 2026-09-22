@@ -289,13 +289,34 @@ The default is `g28` anyway, and it is the one deliberate divergence in the
 defaults: tools are changed by hand on these machines, and a tool change
 should happen with the spindle parked at the top of Z rather than a few
 millimetres above the work. `g30` is the same through G30; `g53` retracts
-to `--home-x`/`-y`/`-z` in machine coordinates (it used to emit nothing for
-Z, which meant the footer sent the tool to machine home in XY at whatever
+Z to `--home-z` in machine coordinates (it used to emit nothing for Z,
+which meant the footer sent the tool to machine home in XY at whatever
 depth the last operation stopped at — do not reinstate that). Whatever the
 mode, a retract moves **Z in a block of its own**, before any XY move.
+`--home-x`/`-y` are only ever reached through `--home-xy-at-end`; nothing
+else in the post moves XY home.
 
 Do not change the `--safe-retracts` default without saying so in the PR
 description: it decides where a manual tool change happens.
+
+## The end of the program
+
+The footer retracts **Z only**. It used to follow that with a traverse to
+machine home in XY, which is a full-width move across the table at
+whatever height Z stopped at — work holding, dust shoes and clamps are all
+in that path, and nothing about the end of a program needs the gantry
+parked. `--home-xy-at-end` asks for the old behaviour and is off by
+default. `tests/fixtures/line_numbers.tap` is posted with
+`--safe-retracts g53 --home-xy-at-end` and pins the machine-coordinate XY
+home end to end; the `G28` form of it has no golden and is pinned by
+`TestFooter.test_footer_homes_xy_after_z_when_asked` instead, which asserts
+on the four blocks before `M30`. Every other golden shows the default
+footer.
+
+The Z retract is emitted unconditionally, even when the last operation
+already ended parked at clearance height: that block is what guarantees
+the tool is clear, and it is not worth making it depend on the post's own
+position tracking.
 
 ## Safety note
 
