@@ -74,6 +74,18 @@ Consequences that have already bitten once, all covered by
 * Several sections can open before anything moves, so the start-up retract
   must be suppressed when the tool is already parked (`self.retracted`,
   cleared whenever Z is commanded).
+* **The XY-before-Z convention is AVID's; the reordering that achieves it is
+  ours.** A real AVID/Fusion program positions XY and only then brings Z
+  down (`tests/fixtures/avid_fusion_shape.tap`, pinned to one). But an
+  Autodesk post does not reorder anything — it is handed the section's
+  initial position as data and writes the approach itself. FreeCAD gives
+  this post a flat command stream instead, so it has to *infer* the same
+  intent and move blocks around. The convention is borrowed; the inference
+  is invented here, and it is the only place this post changes the order of
+  what FreeCAD emitted. Every bug in this area so far has come from the
+  inference, not the convention. Treat it as the highest-risk code in the
+  file and keep `TestXYBeforeZ`, `TestZLiftIsNeverDeferred` and
+  `TestNoSafeRetracts` green.
 * **Real operations open with `G0 Z<clearance>` and only then rapid in XY.**
   Emitted verbatim after a `G28` that plunges the tool to within a few
   millimetres of the table wherever the spindle is parked, then traverses

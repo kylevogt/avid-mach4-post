@@ -187,7 +187,8 @@ Two things worth knowing about the motion this post emits:
   order the tool would descend to within a few millimetres of the table
   wherever the spindle happened to be parked, then cross the work at that
   height. The post reorders those two rapids — it never invents or drops a
-  move. A Z rapid issued when the tool is *not* parked is the move that
+  move. The convention comes from AVID's own output; the reordering that
+  achieves it from FreeCAD's command stream is this post's own work. A Z rapid issued when the tool is *not* parked is the move that
   lifts it out of the cut, and is left exactly where it is.
 * **`G43` is applied before any Z move after a tool change** — it rides the
   first plain Z word (rapid or plunge), and is stated on a line of its own
