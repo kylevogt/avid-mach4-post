@@ -287,7 +287,8 @@ def _build_parser():
          "emit arcs using an R word",
          "emit arcs using I/J/K (default)")
     flag("home-xy-at-end", "home_xy_at_end", False,
-         "traverse to machine home in XY at program end",
+         "traverse to machine home in XY at program end; no effect under "
+         "--safe-retracts none, which emits no retract of any kind",
          "leave the tool where it is in XY at program end, retracting Z "
          "only (default)")
     flag("dust-collector", "dust_collector", False,

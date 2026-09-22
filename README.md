@@ -98,7 +98,8 @@ Retracts move **Z only**. The program ends with the tool lifted but still
 over the work in X/Y, because a traverse to machine home crosses the whole
 table at whatever height Z stopped at and clamps, vises and dust shoes tend
 to be in the way. `--home-xy-at-end` adds that move back (`G28 G91 X0. Y0.`
-/ `G90`, or `G53 G0 X<--home-x> Y<--home-y>`) after the final Z retract.
+/ `G90`, or `G53 G0 X<--home-x> Y<--home-y>`) after the final Z retract —
+except under `--safe-retracts none`, which emits no retract of any kind.
 
 `--safe-retracts none` is the setting that matches an AVID/Fusion program
 exactly: no `G28` after the preamble, no move to machine home before `M30`,

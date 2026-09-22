@@ -124,6 +124,11 @@ class TestFooter:
         assert lines[end - 4:end] == [
             "G28 G91 Z0.", "G90", "G28 G91 X0. Y0.", "G90"]
 
+    def test_home_xy_at_end_emits_nothing_without_retracts(self, run_post):
+        lines = run_post(simple_op(),
+                         "--safe-retracts none --home-xy-at-end")
+        assert lines[-2:] == ["", "M30"]
+
 
 class TestSafeRetracts:
     def test_g28_is_the_default_and_restores_absolute(self, run_post):
