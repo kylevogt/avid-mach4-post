@@ -72,7 +72,7 @@ class TestToolTable:
         tool_line = [line for line in lines if line.startswith("(T2")][0]
         assert "D=0.25" in tool_line
         assert "CR=0." in tool_line
-        assert "14 FLAT" in tool_line  # the "/" is not comment safe
+        assert "1-4 FLAT" in tool_line  # "/" is not comment safe, "-" is
 
     def test_zmin_spans_every_operation_using_the_tool(self, run_post):
         job = real_job()
@@ -91,15 +91,20 @@ class TestRetracts:
     def test_startup_retract_is_not_repeated(self, run_post):
         # Fixture and ToolController both opened a section before anything
         # moved, which produced two G28 blocks back to back.
-        lines = run_post(real_job(), "--no-header")
+        lines = run_post(real_job(), "")
         assert lines.count("G28 G91 Z0.") == 2  # program start + program end
+
+    def test_no_retract_at_all_under_safe_retracts_none(self, run_post):
+        lines = run_post(real_job(), "--safe-retracts none")
+        assert not any(line.startswith(("G28", "G30", "G53"))
+                       for line in lines)
 
     def test_a_tool_change_after_cutting_still_retracts(self, run_post):
         job = real_job()
         job.append(FakeToolControllerOp(7, FakeTool("V Bit", 12.7),
                                         "TC: V Bit"))
         job.append(adaptive_op("Engrave", 7))
-        lines = run_post(job, "--no-header")
+        lines = run_post(job, "")
         assert lines.count("G28 G91 Z0.") == 3
         assert lines.index("G28 G91 Z0.", lines.index("T2 M6")) < \
             lines.index("T7 M6")
@@ -141,3 +146,217 @@ class TestFeedUnits:
         lines = run_post(real_job(),
                          "--no-header --metric --feed-units mm-per-minute")
         assert "F85." in " ".join(lines)
+
+
+class TestToolChangeRetracts:
+    """The spindle is parked at the top of Z before any tool is swapped."""
+
+    def test_a_mid_section_tool_change_retracts_first(self, run_post):
+        # begin_section only retracts ahead of an operation that *opens*
+        # with M6; an M6 part way through one used to change tools with the
+        # collet still down in the part
+        operation = FakeOperation("Custom", [
+            cmd("M6", T=1), cmd("M3", S=12000),
+            cmd("G0", X=25.4, Y=25.4),
+            cmd("G1", Z=-76.2, F=ipm(20)),
+            cmd("M6", T=2), cmd("M3", S=12000),
+            cmd("G0", Z=127.0),
+            cmd("G0", X=101.6, Y=101.6),
+        ], FakeToolController(1))
+        lines = run_post(operation, "--no-write-tools")
+        cut = lines.index("G1 G43 Z-3. H1 F20.")
+        assert lines.index("G28 G91 Z0.", cut) < lines.index("T2 M6")
+        after = lines[lines.index("T2 M6"):]
+        assert after[3:5] == ["G0 G43 Z5. H2", "X4. Y4."]
+
+    def test_g53_mode_retracts_before_a_tool_change(self, run_post):
+        # --safe-retracts g53 used to emit no Z retract at all, so the tool
+        # stayed at cutting depth through the tool change
+        def op(label, tool):
+            return FakeOperation(label, [
+                cmd("M6", T=tool), cmd("M3", S=12000),
+                cmd("G0", Z=127.0),
+                cmd("G0", X=101.6, Y=101.6),
+                cmd("G1", Z=-25.4, F=ipm(20)),
+            ], FakeToolController(tool))
+
+        lines = run_post([op("A", 1), op("B", 2)],
+                         "--no-header --no-write-tools --safe-retracts g53")
+        cut = lines.index("G1 Z-1. F20.")
+        assert lines.index("G53 G0 Z0.", cut) < lines.index("T2 M6")
+        after = lines[lines.index("T2 M6"):]
+        assert after[3:5] == ["G0 G43 Z5. H2", "X4. Y4."]
+
+
+class TestRealDrillingStream:
+    """The shape FreeCAD 1.0's Drilling operation actually emits.
+
+    ``G0 Z<clearance>``, then ``G90``, then ``G98``/``G99``, then a
+    ``G0 X Y`` per hole. The restated ``G90`` and the retract mode must not
+    disturb the blocks around them.
+    """
+
+    def drilling_job(self, retract="G98"):
+        job = real_job()
+        job[-1] = FakeOperation("Drilling", [
+            cmd("G0", Z=15.0),
+            cmd("G90"),
+            cmd(retract),
+            cmd("G0", X=76.2, Y=73.0),
+            cmd("G81", X=76.2, Y=73.0, Z=-10.0, R=2.0, F=ipm(8)),
+            cmd("G0", X=101.6, Y=73.0),
+            cmd("G81", X=101.6, Y=73.0, Z=-10.0, R=2.0, F=ipm(8)),
+            cmd("G80"),
+            cmd("G0", Z=15.0),
+        ], FakeToolController(2, FakeTool("1/4 Flat", 6.35, 0.0)))
+        return job
+
+    def test_freecads_own_approach_order_is_preserved(self, run_post):
+        # clearance, traverse, then the cycle -- exactly as FreeCAD emits it
+        lines = run_post(self.drilling_job(), "--no-header --no-write-tools")
+        body = lines[lines.index("(DRILLING)"):]
+        assert body[2:5] == ["G0 G43 Z0.5906 H2", "G98", "X3. Y2.874"]
+
+    def test_a_g99_retract_mode_is_preserved(self, run_post):
+        lines = run_post(self.drilling_job("G99"),
+                         "--no-header --no-write-tools")
+        assert "G99" in lines
+        assert not any("G98" in line for line in lines)
+
+    def test_both_holes_are_drilled(self, run_post):
+        lines = run_post(self.drilling_job(), "--no-header --no-write-tools")
+        body = lines[lines.index("(DRILLING)"):lines.index("G80")]
+        assert "G98" in body  # from the stream, not restated by the cycle
+        assert "G81 X3. Y2.874 Z-0.3937 R0.0787 F8." in body
+        assert "G0 X4." in body
+
+
+class TestMultiPassAdaptive:
+    """A real FreeCAD Adaptive operation, stepping down in several passes.
+
+    Pinned against an export from FreeCAD 1.0. Every pass goes clearance,
+    traverse, safe height, cut -- FreeCAD positions the tool safely on its
+    own and this post passes that order through untouched.
+    """
+
+    def job(self):
+        def helix(z_start, z_end, steps):
+            out, z = [], z_start
+            step = (z_end - z_start) / steps
+            for n in range(steps):
+                z += step
+                up = n % 2 == 0
+                out.append(cmd("G3", Y=79.3623 if up else 73.0326,
+                               Z=z, I=0.0, J=3.1648 if up else -3.1648,
+                               F=ipm(220)))
+            return out
+
+        commands = [cmd("(Adaptive)"), cmd("(Helix to depth -6.350000)"),
+                    cmd("G0", Z=5.0), cmd("G0", X=76.1975, Y=73.0326),
+                    cmd("G0", Z=3.0), cmd("G1", Z=0.0, F=ipm(80))]
+        commands += helix(0.0, -6.35, 8)
+        commands += [cmd("(Adaptive - depth -6.350000)"),
+                     cmd("G1", Y=73.0224, F=ipm(220)),
+                     cmd("G1", X=64.77, Y=50.919),
+                     cmd("G0", Z=5.0),
+                     cmd("(Helix to depth -12.700000)"),
+                     cmd("G0", X=76.1975, Y=73.0326),
+                     cmd("G0", Z=3.0),
+                     cmd("G1", Z=-6.35, F=ipm(80))]
+        commands += helix(-6.35, -12.7, 8)
+        commands += [cmd("G1", Y=73.0224, F=ipm(220)), cmd("G0", Z=5.0)]
+
+        tool = FakeTool('1/4" Flat', 6.35, 0.0)
+        return [FakeJob("Paths Test"), FakeFixtureOp("G54"),
+                FakeToolControllerOp(2, tool, 'TC: 1/4" Flat'),
+                FakeOperation("Adaptive", commands,
+                              FakeToolController(2, tool))]
+
+    def body(self, run_post):
+        lines = run_post(self.job(), "--no-write-tools")
+        start = lines.index("(ADAPTIVE)")
+        return lines[start:lines.index("", start)]
+
+    def test_the_first_pass_follows_freecads_order(self, run_post):
+        body = self.body(run_post)
+        assert body[2:6] == ["G54", "G0 G43 Z0.1969 H2", "X2.9999 Y2.8753",
+                             "Z0.1181"]
+
+    def test_every_pass_lifts_before_it_traverses(self, run_post):
+        # G0 Z0.1969 takes the tool out of the cut before the traverse back
+        # to the helix entry -- FreeCAD's own ordering, passed through
+        body = self.body(run_post)
+        lift = body.index("G0 Z0.1969")
+        assert body[lift + 1] == "(HELIX TO DEPTH -12.700000)"
+        assert body[lift + 2] == "X2.9999 Y2.8753"
+        assert body[lift + 3] == "Z0.1181"
+
+    def test_the_offset_is_applied_once(self, run_post):
+        assert len([ln for ln in self.body(run_post) if "G43" in ln]) == 1
+
+    def test_the_plunge_feed_returns_after_each_rapid(self, run_post):
+        # a rapid invalidates the modal feed, so the re-entry plunge has to
+        # restate F80 rather than inherit the helix's F220
+        body = self.body(run_post)
+        assert body.count("G1 Z-0.25 F80.") == 1
+
+    def test_the_helix_feed_is_stated_once_per_pass(self, run_post):
+        body = self.body(run_post)
+        assert len([ln for ln in body if "F220." in ln]) == 2
+
+
+class TestWorkOffsets:
+    """The fixture the job selected has to survive the whole program.
+
+    FreeCAD puts the Fixture pseudo operation *before* the ToolController,
+    so the offset is already on the control when the first M6 arrives. A
+    tool change clears the control's copy, and what gets restated after it
+    decides which physical location every later move goes to.
+    """
+
+    def job(self, code="G55", ops=1):
+        tool = FakeTool("Flat")
+        body = [cmd("G0", Z=5.0), cmd("G0", X=25.4, Y=25.4),
+                cmd("G1", Z=-3.0, F=ipm(40))]
+        out = [FakeJob("J"), FakeFixtureOp(code),
+               FakeToolControllerOp(1, tool, "TC: Flat")]
+        for n in range(ops):
+            out.append(FakeOperation(f"Rough{n}", list(body),
+                                     FakeToolController(1, tool)))
+        return out
+
+    def test_a_g55_job_is_not_moved_onto_g54(self, run_post):
+        lines = run_post(self.job("G55"), "--no-write-tools")
+        assert "G54" not in lines
+        assert lines.count("G55") == 2   # the fixture, and after the M6
+
+    def test_an_extended_offset_survives_too(self, run_post):
+        lines = run_post(self.job("G59.1"), "--no-write-tools")
+        assert "G54" not in lines
+        assert lines.count("G59.1") == 2
+
+    def test_g54_is_still_the_fallback_when_none_is_named(self, run_post):
+        job = self.job()
+        del job[1]                        # no Fixture pseudo operation
+        lines = run_post(job, "--no-write-tools")
+        assert "G54" in lines
+
+    def test_a_second_fixture_restates_every_axis(self, run_post):
+        # a closed profile ends where it started, so without the reset the
+        # approach to the *second* fixture is suppressed and the tool
+        # plunges at the first part's location
+        tool = FakeTool("Flat")
+
+        def profile():
+            return FakeOperation("Profile", [
+                cmd("G0", Z=15.0), cmd("G0", X=0.0, Y=0.0),
+                cmd("G1", Z=-3.0, F=ipm(40)),
+                cmd("G1", X=50.0, F=ipm(80)), cmd("G1", X=0.0),
+                cmd("G0", Z=15.0)], FakeToolController(1, tool))
+
+        lines = run_post([FakeJob("J"), FakeFixtureOp("G54"),
+                          FakeToolControllerOp(1, tool, "TC: Flat"),
+                          profile(), FakeFixtureOp("G55"), profile()],
+                         "--no-write-tools")
+        tail = [ln for ln in lines[lines.index("G55"):] if ln]
+        assert tail[1:4] == ["(PROFILE)", "Z0.5906", "X0. Y0."]
