@@ -32,9 +32,16 @@ class FakeTool:
 
 
 class FakeToolController:
-    def __init__(self, number=1, tool=None):
+    def __init__(self, number=1, tool=None, horiz_rapid=None,
+                 vert_rapid=None):
         self.ToolNumber = number
         self.Tool = tool if tool is not None else FakeTool()
+        # FreeCAD stores these as velocities in mm/second, like every other
+        # feed; they are unset (0) on a fresh tool controller
+        if horiz_rapid is not None:
+            self.HorizRapid = horiz_rapid
+        if vert_rapid is not None:
+            self.VertRapid = vert_rapid
 
 
 class FakeOperation:

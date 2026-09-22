@@ -5,6 +5,7 @@ from conftest import (
     FakeTool,
     FakeToolController,
     cmd,
+    ipm,
     mmpm,
 )
 
@@ -296,3 +297,56 @@ class TestToolNumberResolution:
         lines = run_post(operation, "--no-header --no-write-tools")
         assert not any(line.startswith("T0") for line in lines)
         assert "T0 M6" not in lines
+
+
+class TestRapidRates:
+    """`G0` ignores `F`, so the only way to honour a tool controller's rapid
+    rate is to emit the move as `G1`. FreeCAD's own mach3/mach4 post picks
+    the rate the same way: vertical when the block moves Z."""
+
+    def op(self, horiz=None, vert=None):
+        controller = FakeToolController(1, FakeTool("Flat"),
+                                        horiz_rapid=horiz, vert_rapid=vert)
+        return FakeOperation("Contour", [
+            cmd("M6", T=1), cmd("M3", S=12000),
+            cmd("G0", Z=15.24),
+            cmd("G0", X=76.2, Y=76.2),
+            cmd("G1", Z=-3.0, F=ipm(40)),
+            cmd("G0", Z=15.24),
+        ], controller)
+
+    def body(self, run_post, op, args="--no-write-tools"):
+        lines = run_post(op, args)
+        start = lines.index("(CONTOUR)")
+        return lines[start:lines.index("", start)]
+
+    def test_rapids_stay_g0_when_no_rate_is_given(self, run_post):
+        body = self.body(run_post, self.op())
+        assert "G0 G43 Z0.6 H1" in body
+        assert not any("F400." in line for line in body)
+
+    def test_a_z_rapid_uses_the_vertical_rate(self, run_post):
+        body = self.body(run_post, self.op(ipm(400), ipm(80)))
+        assert body[5] == "G1 G43 Z0.6 H1 F80."
+
+    def test_an_xy_rapid_uses_the_horizontal_rate(self, run_post):
+        body = self.body(run_post, self.op(ipm(400), ipm(80)))
+        assert body[6] == "X3. Y3. F400."
+
+    def test_the_cutting_feed_still_wins_after_a_rapid(self, run_post):
+        # the rapid's F must not leak into the cut that follows it
+        body = self.body(run_post, self.op(ipm(400), ipm(80)))
+        assert body[7] == "Z-0.1181 F40."
+        assert body[8] == "Z0.6 F80."
+
+    def test_one_rate_alone_is_not_enough(self, run_post):
+        # inventing the missing one is how a traverse ends up at the wrong
+        # speed, so both or nothing
+        body = self.body(run_post, self.op(ipm(400), None))
+        assert "G0 G43 Z0.6 H1" in body
+
+    def test_the_conversion_can_be_turned_off(self, run_post):
+        body = self.body(run_post, self.op(ipm(400), ipm(80)),
+                         "--no-write-tools --no-rapid-feeds")
+        assert "G0 G43 Z0.6 H1" in body
+        assert not any("F400." in line for line in body)
