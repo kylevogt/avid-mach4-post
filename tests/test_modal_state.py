@@ -387,3 +387,28 @@ class TestToolLengthOffsetFromTheStream:
             cmd("G49"), cmd("G0", Z=5.0),
         ])
         assert out[-2:] == ["G49", "Z0.1969"]
+
+
+class TestFrameChanges:
+    """Anything that re-frames the coordinates invalidates the axis cache.
+
+    Modal suppression is only sound while a word means the same physical
+    place. Each of these used to let a real move be dropped because it
+    happened to repeat a number.
+    """
+
+    def test_g92_does_not_swallow_the_move_after_it(self, run_post):
+        out = run(run_post, [
+            cmd("G0", X=25.4, Y=25.4), cmd("G0", Z=5.0),
+            cmd("G92", X=0.0, Y=0.0),
+            cmd("G0", X=25.4, Y=25.4),
+        ])
+        assert out[-2:] == ["G92 X0. Y0.", "X1. Y1."]
+
+    def test_g10_does_not_swallow_the_move_after_it(self, run_post):
+        out = run(run_post, [
+            cmd("G0", X=25.4, Y=25.4), cmd("G0", Z=5.0),
+            cmd("G10", L=2, P=1, X=0.0, Y=0.0),
+            cmd("G0", X=25.4, Y=25.4),
+        ])
+        assert out[-1] == "X1. Y1."

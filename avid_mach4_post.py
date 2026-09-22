@@ -123,6 +123,12 @@ WORK_OFFSET_CODES = {"G54", "G55", "G56", "G57", "G58", "G59"} | {
 # read "X1." as one millimetre.
 UNIT_CODES = {"G20", "G21"}
 
+# Codes that move the coordinate frame out from under the program without
+# moving the machine.  A cached axis word is only safe to suppress while it
+# still means the same physical place, so each of these invalidates the
+# cache -- see AvidPost.invalidate_axis_cache.
+FRAME_CHANGING_CODES = {"G10", "G92", "G92.1", "G92.2", "G92.3"}
+
 
 # --------------------------------------------------------------------------
 # number / word formatting
@@ -475,6 +481,19 @@ class AvidPost:
         self.write("")
 
     # -- retracts -----------------------------------------------------------
+    def invalidate_axis_cache(self):
+        """Forget every cached axis word.
+
+        Modal suppression is only sound while a word means the same place
+        it did last time it was written.  Anything that re-frames the
+        coordinate system -- a different fixture, a switch between absolute
+        and incremental, a tool length offset, a ``G92`` -- has to come
+        through here, or the next move that happens to repeat a number is
+        silently dropped and the tool cuts somewhere else.
+        """
+        for output in self.axis_outputs.values():
+            output.reset()
+
     def write_absolute_mode(self, code):
         """Emit ``G90``/``G91``, if the control is not in that mode already.
 
@@ -484,8 +503,7 @@ class AvidPost:
         """
         text = self.abs_inc_modal.format(code)
         if text:
-            for output in self.axis_outputs.values():
-                output.reset()
+            self.invalidate_axis_cache()
         return text
 
     def write_retract(self, *axes):
@@ -703,10 +721,7 @@ class AvidPost:
             self.active_work_offset = key
         if key == self.current_work_offset:
             return
-        # the cached axis words belong to the old fixture: the same numbers
-        # are a different place now, so none of them may be suppressed
-        for output in self.axis_outputs.values():
-            output.reset()
+        self.invalidate_axis_cache()
         self.current_work_offset = key
         self.write_block(*key.split(" "))
 
@@ -816,6 +831,10 @@ class AvidPost:
             self.write_work_offset()
             self.flush_coolant()
             self.write_cycle(name, params)
+            return
+        if name in FRAME_CHANGING_CODES:
+            self.invalidate_axis_cache()
+            self.write_block(self._passthrough(name, params))
             return
         if name == "G80":
             self.cycle_modal.reset()
