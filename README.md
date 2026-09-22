@@ -124,7 +124,8 @@ Common adjustments:
 
 `--home-x`, `--home-y` and `--home-z` are in **millimetres**, whatever the
 output unit — they are machine coordinates, and FreeCAD's internal unit is
-the millimetre.
+the millimetre. `--home-x` and `--home-y` only reach the g-code together
+with `--home-xy-at-end`; nothing else in the post moves XY home.
 
 Run `python -c "import avid_mach4_post; print(avid_mach4_post.TOOLTIP_ARGS)"`
 for the full list.

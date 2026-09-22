@@ -323,8 +323,8 @@ def _build_parser():
         "--safe-retracts", dest="safe_retracts", default="g28",
         choices=["g28", "g30", "g53", "none"],
         help="how to retract between operations and at program end: g28/g30 "
-             "send the axes home incrementally, g53 moves to --home-x/y/z in "
-             "machine coordinates, none emits no retract at all and leaves "
+             "send Z home incrementally, g53 moves Z to --home-z in machine "
+             "coordinates, none emits no retract at all and leaves "
              "each operation's own clearance-height move to do the job -- "
              "which is what the AVID Fusion post does with its useG28 "
              "property off (default: g28, so that a tool change happens "
@@ -341,10 +341,14 @@ def _build_parser():
                              "(default: 4 for inches, 3 for millimetres)")
     parser.add_argument("--home-x", dest="home_x", type=float, default=0.0,
                         help="X machine home used by --safe-retracts g53, "
-                             "in MILLIMETRES whatever the output unit")
+                             "in MILLIMETRES whatever the output unit; only "
+                             "reached if --home-xy-at-end is given, since "
+                             "nothing else moves XY home")
     parser.add_argument("--home-y", dest="home_y", type=float, default=0.0,
                         help="Y machine home used by --safe-retracts g53, "
-                             "in MILLIMETRES whatever the output unit")
+                             "in MILLIMETRES whatever the output unit; only "
+                             "reached if --home-xy-at-end is given, since "
+                             "nothing else moves XY home")
     parser.add_argument("--home-z", dest="home_z", type=float, default=0.0,
                         help="Z machine position --safe-retracts g53 "
                              "retracts to, in MILLIMETRES whatever the "

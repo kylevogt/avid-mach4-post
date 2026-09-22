@@ -276,10 +276,12 @@ The default is `g28` anyway, and it is the one deliberate divergence in the
 defaults: tools are changed by hand on these machines, and a tool change
 should happen with the spindle parked at the top of Z rather than a few
 millimetres above the work. `g30` is the same through G30; `g53` retracts
-to `--home-x`/`-y`/`-z` in machine coordinates (it used to emit nothing for
-Z, which meant the footer sent the tool to machine home in XY at whatever
+Z to `--home-z` in machine coordinates (it used to emit nothing for Z,
+which meant the footer sent the tool to machine home in XY at whatever
 depth the last operation stopped at — do not reinstate that). Whatever the
 mode, a retract moves **Z in a block of its own**, before any XY move.
+`--home-x`/`-y` are only ever reached through `--home-xy-at-end`; nothing
+else in the post moves XY home.
 
 Do not change the `--safe-retracts` default without saying so in the PR
 description: it decides where a manual tool change happens.
