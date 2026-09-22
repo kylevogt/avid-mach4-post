@@ -8,8 +8,14 @@ against a real export instead of being guessed at.
 Install it exactly like the real post -- copy this file into FreeCAD's user
 macro directory -- then pick ``avid_probe`` as the Job's post processor and
 post as usual.  The g-code it returns is inert (comments and ``M30``); the
-report goes to a separate ``.txt`` file whose path is named in the g-code
-and printed to the Report view.
+report goes to a separate ``.txt`` file.  **That .txt is the file worth
+keeping**, not the .nc.  Its full path is written into the g-code and
+printed to the Report view.
+
+FreeCAD 1.0 calls a post with ``filename="-"`` and writes the output file
+itself, so by default the report lands in your home directory.  Pass
+``--out /some/where/report.txt`` in the Job's post processor arguments to
+put it somewhere specific.
 
 Nothing here is imported by the real post, and nothing here is on the
 machine's side of the fence.
@@ -255,8 +261,8 @@ def export(objectslist, filename, argstring=""):
     return "\n".join([
         "(AVID PROBE POST - DIAGNOSTIC ONLY - THIS IS NOT A PROGRAM)",
         "(DO NOT RUN THIS FILE ON A MACHINE)",
-        f"(REPORT WRITTEN TO {os.path.basename(str(written)).upper()})",
-        "(THE FULL PATH IS ALSO IN THE REPORT VIEW)",
+        "(THIS FILE IS NOT THE REPORT - THE REPORT IS THE TXT BELOW)",
+        f"(REPORT: {written})",
         "M30",
         "",
     ])
