@@ -99,6 +99,9 @@ PARAMETER_ORDER = "XYZABCIJKRQPLSFHDT"
 # Motion words whose value is suppressed while unchanged.
 MOTION_CODES = {"G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03"}
 ARC_CODES = {"G2", "G02", "G3", "G03"}
+# below this chord (in FreeCAD's millimetres) an arc that ends where it
+# starts is a genuine full circle rather than rounding noise
+ARC_CHORD_EPS = 1e-6
 CYCLE_CODES = {
     "G73", "G74", "G76", "G81", "G82", "G83", "G84", "G85", "G86", "G87",
     "G88", "G89",
@@ -931,11 +934,9 @@ class AvidPost:
         return self.motion_modal.format(code)
 
     def write_arc(self, code, params):
-        self.apply_tool_length_offset()
         start = dict(self.position)
         i = params.get("I", 0.0) or 0.0
         j = params.get("J", 0.0) or 0.0
-        k = params.get("K")
         if self._is_incremental():
             # the X/Y in the block are deltas; comparing one against an
             # absolute start turned a half circle into a full one
@@ -944,12 +945,28 @@ class AvidPost:
         else:
             end_x = params.get("X", start["X"])
             end_y = params.get("Y", start["Y"])
-        full_circle = (
+        ends_where_it_starts = (
             self.xyz_format.format(end_x) == self.xyz_format.format(start["X"])
             and self.xyz_format.format(end_y) ==
             self.xyz_format.format(start["Y"])
         )
+        full_circle = ends_where_it_starts and (
+            math.hypot(end_x - start["X"], end_y - start["Y"]) < ARC_CHORD_EPS
+            or _arc_sweep(start["X"], start["Y"], start["X"] + i,
+                          start["Y"] + j, end_x, end_y, code == 2) > math.pi
+        )
+        if ends_where_it_starts and not full_circle:
+            # a sliver of an arc -- a compensated corner a few microns
+            # long -- whose end point rounds onto its start.  Written as an
+            # arc, the control reads "end == start" as a full 360 degree
+            # turn and cuts a circle of the tool's radius into the part.
+            # The motion it describes is below the output resolution, so
+            # it goes out as the (usually empty) linear move it rounds to.
+            self.write_linear(
+                1, {k: v for k, v in params.items() if k not in "IJKR"})
+            return
 
+        self.apply_tool_length_offset()
         words = [self._plane_word()]
         words.append(self._motion_word(code))
         if full_circle:
@@ -975,10 +992,11 @@ class AvidPost:
                 radius = -radius
             words.append("R" + self.xyz_format.format(radius))
         elif in_xy_plane:
+            # never a K word here: Mach4 rejects it ("K word given for arc
+            # in XY plane") and halts the program on that line.  A helix
+            # carries its climb in the Z word; K adds nothing in G17.
             words.append("I" + self.xyz_format.format(i))
             words.append("J" + self.xyz_format.format(j))
-            if k is not None:
-                words.append("K" + self.xyz_format.format(k))
         else:
             # outside G17 the centre is described by a different pair of
             # letters; pass through exactly what the path carries
